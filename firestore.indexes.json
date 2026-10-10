@@ -1,0 +1,11 @@
+{
+  "indexes": [
+    { "collectionGroup": "products", "queryScope": "COLLECTION", "fields": [ { "fieldPath": "active", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] },
+    { "collectionGroup": "orders", "queryScope": "COLLECTION", "fields": [ { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] },
+    { "collectionGroup": "mail", "queryScope": "COLLECTION", "fields": [ { "fieldPath": "status", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "DESCENDING" } ] }
+  ],
+  "fieldOverrides": [
+    { "collectionGroup": "rateLimits", "fieldPath": "expireAt", "ttl": true, "indexes": [] },
+    { "collectionGroup": "idempotency", "fieldPath": "expireAt", "ttl": true, "indexes": [] }
+  ]
+}
