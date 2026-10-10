@@ -33,8 +33,8 @@ const auth = getAuth();
 
   if (!process.argv.includes('--empty')) {
     await svc.adminSaveProduct(db, u.uid, { name: 'DEMO Team Hoodie', description: 'Emulator demo product (not real merchandise).', priceCents: 4500, active: true, featured: true, images: [], variants: [
-      { size: 'S', color: 'Black', stockQuantity: 4 }, { size: 'M', color: 'Black', stockQuantity: 5 }, { size: 'L', color: 'Black', stockQuantity: 0 }, { size: 'M', color: 'White', stockQuantity: 2 }] });
-    await svc.adminSaveProduct(db, u.uid, { name: 'DEMO Tee', description: 'Emulator demo product.', priceCents: 2500, active: true, images: [], variants: [{ size: 'M', color: 'Red', stockQuantity: 10 }] });
+      { size: 'S', color: 'Black' }, { size: 'M', color: 'Black' }, { size: 'L', color: 'Black' }, { size: 'M', color: 'White' }] });
+    await svc.adminSaveProduct(db, u.uid, { name: 'DEMO Tee', description: 'Emulator demo product.', priceCents: 2500, active: true, images: [], variants: [{ size: 'M', color: 'Red' }] });
   }
   console.log('Seeded emulator data.');
 })().catch((e) => { console.error(e); process.exit(1); });

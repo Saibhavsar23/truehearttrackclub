@@ -12,7 +12,7 @@ $('#yr').textContent = new Date().getFullYear();
 const S = {
   status: null,       // { open, closesAtMillis, nextOpensAtMillis, scheduleName }
   skew: 0,            // server time - local time
-  catalog: null,      // [{ id, name, description, priceCents, images, featured, variants:[{id,size,color,inStock,sku}] }]
+  catalog: null,      // [{ id, name, description, priceCents, images, featured, variants:[{id,size,color,sku}] }]
   settings: { fulfillmentMethods: [], checkoutNotice: '' },
   notes: new Map(),   // `${productId}/${variantId}` -> message about a cart line
   submitting: false,
@@ -49,7 +49,6 @@ function productImage(p, cls = '') {
   if (im) return h('img', { src: im.url, alt: im.alt || p.name, loading: 'lazy', decoding: 'async', class: cls });
   return h('div', { class: 'noimg' }, 'Photo coming soon');
 }
-const soldOut = (p) => !p.variants.some((v) => v.inStock);
 
 const SIZE_RANK = ['XXS','XS','S','M','L','XL','XXL','2XL','XXXL','3XL','4XL'];
 const sizeRank = (s) => { const i = SIZE_RANK.indexOf(String(s).toUpperCase().trim()); return i === -1 ? 100 : i; };
@@ -93,7 +92,6 @@ function reconcileCart() {
     const p = S.catalog.find((x) => x.id === it.productId);
     const v = p && p.variants.find((x) => x.id === it.variantId);
     if (!p || !v) { S.notes.set(lineKey(it), { bad: true, text: 'No longer available. Remove it to continue.' }); changed = true; continue; }
-    if (!v.inStock) { S.notes.set(lineKey(it), { bad: true, text: 'Sold out. Remove it to continue.' }); changed = true; continue; }
     if (p.priceCents !== it.priceCents) {
       S.notes.set(lineKey(it), { bad: false, text: `Price updated from ${money(it.priceCents)} to ${money(p.priceCents)}.` });
       Cart.updateSnapshot(it.productId, it.variantId, { priceCents: p.priceCents, name: p.name, image: p.images[0] ? p.images[0].url : null });
@@ -186,9 +184,8 @@ function renderCatalog() {
     return;
   }
   const grid = h('ul', { class: 'grid', 'aria-label': 'Products' }, list.map((p) => {
-    const out = soldOut(p);
-    return h('li', {}, h('button', { class: `pcard${out ? ' pcard--soldout' : ''}`, type: 'button', 'aria-haspopup': 'dialog', onclick: () => openProduct(p.id), 'aria-label': `${p.name}, ${money(p.priceCents)}${out ? ', sold out' : ''}` },
-      h('div', { class: 'pcard__media' }, productImage(p), out ? h('span', { class: 'pcard__badge pcard__badge--soldout' }, 'Sold out') : (p.featured ? h('span', { class: 'pcard__badge' }, 'Featured') : null)),
+    return h('li', {}, h('button', { class: 'pcard', type: 'button', 'aria-haspopup': 'dialog', onclick: () => openProduct(p.id), 'aria-label': `${p.name}, ${money(p.priceCents)}` },
+      h('div', { class: 'pcard__media' }, productImage(p), p.featured ? h('span', { class: 'pcard__badge' }, 'Featured') : null),
       h('span', { class: 'pcard__name' }, p.name),
       h('span', { class: 'pcard__price' }, money(p.priceCents)),
     ));
@@ -205,7 +202,6 @@ function openProduct(id) {
   const colors = [...new Set(p.variants.map((v) => v.color))];
   const sel = { size: sizes.length === 1 ? sizes[0] : null, color: colors.length === 1 ? colors[0] : null, qty: 1, img: 0 };
   const vOf = (s, c) => p.variants.find((v) => v.size === s && v.color === c);
-  const out = soldOut(p);
 
   const main = h('div', { class: 'pdp__main' });
   const thumbs = h('div', { class: 'thumbs', role: 'group', 'aria-label': 'Product photos' });
@@ -242,9 +238,9 @@ function openProduct(id) {
     qtyOut.value = String(sel.qty);
     minus.disabled = sel.qty <= 1; plus.disabled = sel.qty >= maxQty();
   }
-  /** Sizes are only disabled when sold out entirely; if the chosen size makes the chosen color impossible, reset the color. */
+  /** If the chosen size does not come in the chosen color, clear the color. */
   function fixSelection(changed) {
-    if (changed === 'size' && sel.color && !(vOf(sel.size, sel.color) || {}).inStock) {
+    if (changed === 'size' && sel.color && !vOf(sel.size, sel.color)) {
       const was = sel.color; sel.color = null;
       gColor.inputs().forEach((i) => { i.checked = false; });
       msg.textContent = `${was} is not available in size ${sel.size}, so the color was cleared. Pick another.`;
@@ -253,20 +249,15 @@ function openProduct(id) {
   function update() {
     gSize.val.textContent = sel.size || '';
     gColor.val.textContent = sel.color || '';
-    gSize.inputs().forEach((i) => { i.disabled = !p.variants.some((v) => v.size === i.value && v.inStock); });
-    gColor.inputs().forEach((i) => {
-      const ok = sel.size ? (vOf(sel.size, i.value) || {}).inStock : p.variants.some((v) => v.color === i.value && v.inStock);
-      i.disabled = !ok;
-    });
+    gColor.inputs().forEach((i) => { i.disabled = sel.size ? !vOf(sel.size, i.value) : false; });
     const v = sel.size && sel.color && vOf(sel.size, sel.color);
     avail.className = 'avail';
-    if (out) { avail.textContent = 'This item is currently sold out.'; avail.classList.add('avail--bad'); }
-    else if (!sel.size && !sel.color) avail.textContent = 'Choose a size and color.';
+    if (!sel.size && !sel.color) avail.textContent = 'Choose a size and color.';
     else if (!sel.size) avail.textContent = 'Choose a size.';
     else if (!sel.color) avail.textContent = 'Choose a color.';
-    else if (v && v.inStock) { avail.textContent = 'In stock.'; avail.classList.add('avail--ok'); }
-    else { avail.textContent = 'Sold out in this size and color.'; avail.classList.add('avail--bad'); }
-    const ready = !out && v && v.inStock;
+    else if (v) { avail.textContent = 'Available to pre-order.'; avail.classList.add('avail--ok'); }
+    else { avail.textContent = 'That size does not come in this color.'; avail.classList.add('avail--bad'); }
+    const ready = !!v;
     addBtn.setAttribute('aria-disabled', String(!ready));
     addBtn.classList.toggle('is-disabled', !ready);
     addBtn.style.opacity = ready ? '' : '.5';
@@ -275,10 +266,9 @@ function openProduct(id) {
   function add() {
     msg.textContent = '';
     const v = sel.size && sel.color && vOf(sel.size, sel.color);
-    if (out) { msg.textContent = 'This item is sold out.'; return; }
     if (!sel.size) { msg.textContent = 'Choose a size first.'; gSize.inputs().find((i) => !i.disabled)?.focus(); return; }
     if (!sel.color) { msg.textContent = 'Choose a color first.'; gColor.inputs().find((i) => !i.disabled)?.focus(); return; }
-    if (!v || !v.inStock) { msg.textContent = 'That size and color is sold out. Try another combination.'; return; }
+    if (!v) { msg.textContent = 'That size and color is not available. Try another combination.'; return; }
     if (Cart.qtyInCart(p.id, v.id) + sel.qty > Cart.MAX_LINE_QTY) { msg.textContent = `You can order up to ${Cart.MAX_LINE_QTY} of one item.`; return; }
     Cart.addItem({ productId: p.id, variantId: v.id, qty: sel.qty, name: p.name, size: v.size, color: v.color, priceCents: p.priceCents, image: p.images[0] ? p.images[0].url : null });
     closeDialog(pdpDlg);
@@ -510,12 +500,10 @@ function handleSubmitError(ex, box, keep) {
     const lines = (d.problems || []).map((p) => {
       const it = Cart.getCart().items.find((i) => i.productId === p.productId && i.variantId === p.variantId);
       const nm = it ? `${it.name} (${it.size}, ${it.color})` : 'An item';
-      if (p.reason === 'insufficient_stock') return `${nm}: only ${p.available} left.`;
       return `${nm}: no longer available.`;
     });
     for (const p of d.problems || []) {
-      if (p.reason === 'insufficient_stock' && p.available > 0) Cart.setQty(p.productId, p.variantId, p.available);
-      S.notes.set(`${p.productId}/${p.variantId}`, { bad: true, text: p.reason === 'insufficient_stock' ? (p.available > 0 ? `Only ${p.available} left. Quantity adjusted.` : 'Sold out. Remove it to continue.') : 'No longer available. Remove it to continue.' });
+      S.notes.set(`${p.productId}/${p.variantId}`, { bad: true, text: 'No longer available. Remove it to continue.' });
     }
     show(`Your cart changed while you were checking out. ${lines.join(' ')} Your order was NOT submitted. Review your cart and try again.`);
     loadCatalog().then(() => { if (cartDlg.open) renderCart(); }).catch(() => {});
@@ -544,7 +532,7 @@ function showConfirmation(res) {
     h('div', {}, h('h3', { style: 'font:600 1rem/1.3 var(--body);margin-bottom:.6rem' }, 'What happens next'),
       h('ol', { class: 'steps' },
         h('li', {}, 'We review your order and email you to confirm it.'),
-        h('li', {}, 'We arrange payment and fulfillment with you directly.'),
+        h('li', {}, 'When the drop closes we place one order for everything requested, then arrange payment and delivery with you directly.'),
         h('li', {}, `A confirmation email should arrive at ${res.customerEmail} shortly. If you do not see it within a few minutes, check your spam folder or write to truehearttrackclub@gmail.com with ${res.orderNumber}.`))),
     h('div', {}, h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => { box.hidden = true; clear(box); try { sessionStorage.removeItem('thtc_last_order'); } catch (_) {} } }, 'Dismiss')),
   ));

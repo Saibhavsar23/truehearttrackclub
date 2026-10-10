@@ -85,7 +85,7 @@ button,input,select,textarea{ font:inherit; color:inherit; }
 .footer{ border-top:1px solid var(--line); padding:2.5rem 0 2.5rem; margin-top:clamp(3rem,8vw,6rem); }
 .footer__grid{ display:grid; gap:1.5rem; }
 .footer nav ul{ display:flex; flex-wrap:wrap; gap:.25rem 1.4rem; }
-.footer nav a{ display:inline-block; padding:.6rem 0; font:600 .78rem/1 var(--body); letter-spacing:.16em; text-transform:uppercase; text-decoration:none; color:var(--muted); }
+.footer nav a{ display:inline-flex; align-items:center; min-height:44px; padding:0; font:600 .78rem/1 var(--body); letter-spacing:.16em; text-transform:uppercase; text-decoration:none; color:var(--muted); }
 .footer small{ display:block; color:rgba(255,255,255,.5); font-size:.8rem; line-height:1.6; max-width:62ch; }
 
 /* ==========================================================================

@@ -10,7 +10,7 @@ const STATUS_LABEL = { submitted: 'Submitted', confirmed: 'Confirmed', preparing
 const ACTION_LABEL = { confirmed: 'Confirm order', preparing: 'Mark preparing', ready: 'Mark ready', fulfilled: 'Mark fulfilled', cancelled: 'Cancel order' };
 
 let F;                      // firebase handles
-const cache = { products: null, inventory: null };
+const cache = { products: null };
 let tab = 'overview';
 let user = null;
 
@@ -122,32 +122,30 @@ async function loadProducts(force) {
   cache.products.sort((a, b) => (ms(b.createdAt) || 0) - (ms(a.createdAt) || 0));
   return cache.products;
 }
-async function loadInventory(force) {
-  if (cache.inventory && !force) return cache.inventory;
-  const { db, fs } = F;
-  const snap = await fs.getDocs(fs.collection(db, 'inventory'));
-  cache.inventory = new Map(snap.docs.map((d) => [d.id, d.data().stockQuantity]));
-  return cache.inventory;
-}
-const stockKey = (pid, vid) => `${pid}__${vid}`;
 
 /* ============================== overview ============================== */
 
 async function viewOverview() {
   const { db, fs } = F; const out = panel;
-  const [status, products, inv, recent, awaiting, scheds] = await Promise.all([
-    callable('getStoreStatus', {}), loadProducts(true), loadInventory(true),
+  const [status, products, recent, awaiting, scheds, all] = await Promise.all([
+    callable('getStoreStatus', {}), loadProducts(true),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(8))),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.where('status', '==', 'submitted'), fs.orderBy('createdAt', 'desc'), fs.limit(25))),
     fs.getDocs(fs.collection(db, 'storeSchedules')),
+    fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(1000))),
   ]);
-  const attention = [];
-  for (const p of products) for (const v of p.variants) {
-    if (!v.active || !p.active) continue;
-    const s = inv.get(stockKey(p.id, v.id)) ?? 0;
-    if (s <= 3) attention.push({ p, v, s });
+  // What has to be ordered from the supplier: every non-cancelled order, summed per product / size / color.
+  const totals = new Map(); let units = 0; let liveOrders = 0;
+  for (const d of all.docs) {
+    const o = d.data(); if (o.status === 'cancelled') continue;
+    liveOrders++;
+    for (const i of o.items || []) {
+      const k = `${i.productName}|${i.size}|${i.color}`;
+      const t = totals.get(k) || { name: i.productName, size: i.size, color: i.color, qty: 0 };
+      t.qty += i.quantity; units += i.quantity; totals.set(k, t);
+    }
   }
-  attention.sort((a, b) => a.s - b.s);
+  const want = [...totals.values()].sort((a, b) => a.name.localeCompare(b.name) || a.size.localeCompare(b.size, undefined, { numeric: true }) || a.color.localeCompare(b.color));
   const unsent = (await fs.getDocs(fs.query(fs.collection(db, 'mail'), fs.where('status', '==', 'failed'), fs.limit(20)))).size;
   const next = status.nextOpensAtMillis;
 
@@ -155,12 +153,16 @@ async function viewOverview() {
     h('div', { class: 'cards' },
       h('div', { class: 'card2' }, h('h3', {}, 'Store status'), h('p', { class: 'big' }, status.open ? 'Open' : 'Closed'), h('p', { class: 'fine', style: 'margin-top:.5rem' }, status.open ? `Closes ${fmtNY(status.closesAtMillis)}` : (next ? `Opens ${fmtNY(next, { year: true })}` : 'No upcoming schedule'))),
       h('div', { class: 'card2' }, h('h3', {}, 'Orders awaiting action'), h('p', { class: 'big' }, String(awaiting.size)), h('p', { class: 'fine', style: 'margin-top:.5rem' }, 'Status: submitted')),
-      h('div', { class: 'card2' }, h('h3', {}, 'Inventory attention'), h('p', { class: 'big' }, String(attention.length)), h('p', { class: 'fine', style: 'margin-top:.5rem' }, '3 or fewer left, or sold out')),
+      h('div', { class: 'card2' }, h('h3', {}, 'Items requested'), h('p', { class: 'big' }, String(units)), h('p', { class: 'fine', style: 'margin-top:.5rem' }, `${liveOrders} order${liveOrders === 1 ? '' : 's'}, cancelled excluded`)),
       h('div', { class: 'card2' }, h('h3', {}, 'Failed emails'), h('p', { class: 'big' }, String(unsent)), h('p', { class: 'fine', style: 'margin-top:.5rem' }, unsent ? 'Open the order to retry' : 'None')),
     ),
     h('section', { class: 'panel', 'aria-labelledby': 'ov-recent' }, h('h2', { id: 'ov-recent' }, 'Recent orders'), ordersTable(recent.docs.map(snapOrder))),
-    h('section', { class: 'panel', 'aria-labelledby': 'ov-inv' }, h('h2', { id: 'ov-inv' }, 'Inventory requiring attention'),
-      attention.length ? h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Product', 'Size', 'Color', 'Left'].map((x) => h('th', { scope: 'col' }, x)))), h('tbody', {}, attention.map((a) => h('tr', {}, h('td', {}, a.p.name), h('td', {}, a.v.size), h('td', {}, a.v.color), h('td', {}, a.s === 0 ? tag('failed', 'Sold out') : String(a.s))))))) : h('p', { class: 'empty' }, 'Nothing needs attention.')),
+    h('section', { class: 'panel', 'aria-labelledby': 'ov-inv' }, h('h2', { id: 'ov-inv' }, 'What to order'),
+      h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Totals across all orders that are not cancelled. Use this when the drop has closed and you place the supplier order.'),
+      want.length ? h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Product', 'Size', 'Color', 'Quantity'].map((x) => h('th', { scope: 'col' }, x)))),
+        h('tbody', {}, want.map((a) => h('tr', {}, h('td', {}, a.name), h('td', {}, a.size), h('td', {}, a.color), h('td', {}, String(a.qty)))),
+          h('tr', {}, h('td', { colspan: 3, style: 'text-align:right;font-weight:700' }, 'Total'), h('td', { style: 'font-weight:700' }, String(units)))))) : h('p', { class: 'empty' }, 'No orders yet.'),
+      all.size >= 1000 ? h('p', { class: 'fine' }, 'Showing the latest 1000 orders only.') : null),
     h('p', { class: 'fine' }, `${scheds.size} schedule${scheds.size === 1 ? '' : 's'} configured · ${products.length} product${products.length === 1 ? '' : 's'}`),
   );
 }
@@ -246,12 +248,17 @@ async function openOrder(o) {
   for (const next of STATUS_NEXT[o.status] || []) {
     const btn = h('button', { class: next === 'cancelled' ? 'btn btn--ghost btn--sm' : 'btn btn--primary btn--sm', type: 'button' }, ACTION_LABEL[next]);
     btn.onclick = () => {
-      const msg = next === 'cancelled' ? `Cancel ${o.orderNumber}? Stock is returned to inventory and the customer is emailed. This cannot be undone.` : `Mark ${o.orderNumber} as ${STATUS_LABEL[next].toLowerCase()}? The customer will be emailed.`;
+      const msg = next === 'cancelled' ? `Cancel ${o.orderNumber}? The customer is emailed. This cannot be undone.` : `Mark ${o.orderNumber} as ${STATUS_LABEL[next].toLowerCase()}? The customer will be emailed.`;
       if (!confirm(msg)) return;
       guarded(btn, async () => { await callable('adminUpdateOrderStatus', { orderId: o.id, status: next }); ordersDirty = true; toast(`${o.orderNumber}: ${STATUS_LABEL[next]}`); await openOrder(o); });
     };
     actions.append(btn);
   }
+  const del = h('button', { class: 'btn btn--ghost btn--sm', type: 'button' }, 'Delete order permanently');
+  del.onclick = () => {
+    if (!confirm(`Permanently delete ${o.orderNumber} (${o.customerName})? The order and its email records are erased and cannot be recovered. No email is sent to the customer.`)) return;
+    guarded(del, async () => { await callable('adminDeleteOrder', { orderId: o.id }); ordersDirty = true; toast(`${o.orderNumber} deleted`); ensureDialog('order-dlg').close(); });
+  };
   const dlg = ensureDialog('order-dlg');
   clear(dlg).append(
     h('div', { class: 'dlg-head' }, h('h2', { id: 'order-dlg-t' }, `Order ${o.orderNumber}`), h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'Close order', onclick: () => dlg.close() }, icon.close())),
@@ -270,7 +277,9 @@ async function openOrder(o) {
       h('div', {}, h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'History'), h('ul', {}, (o.statusHistory || []).map((x) => h('li', { class: 'fine' }, `${fmtNY(x.atMillis)}: ${STATUS_LABEL[x.status] || x.status}`)))),
       h('div', {}, h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'Emails'),
         mails.length ? h('ul', {}, mails.map((m) => h('li', { class: 'fine', style: 'display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;padding:.3rem 0' }, tag(m.status === 'sent' ? 'sent' : m.status === 'failed' ? 'failed' : 'pending', m.status === 'sent' ? 'sent to Make' : m.status), `${m.kind.replace(/_/g, ' ')} → ${m.to}`, m.attempts ? `(attempts: ${m.attempts})` : '', m.lastError && m.status !== 'sent' ? h('span', { class: 'alert' }, m.lastError) : null,
-          m.status === 'failed' ? h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: (e) => guarded(e.currentTarget, async () => { await callable('adminResendMail', { mailId: m.id }); ordersDirty = true; toast('Email re-queued'); await openOrder(o); }) }, 'Retry') : null))) : h('p', { class: 'fine' }, 'No email records.'))),
+          m.status === 'failed' ? h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: (e) => guarded(e.currentTarget, async () => { await callable('adminResendMail', { mailId: m.id }); ordersDirty = true; toast('Email re-queued'); await openOrder(o); }) }, 'Retry') : null))) : h('p', { class: 'fine' }, 'No email records.')),
+      h('div', {}, del, h('p', { class: 'fine', style: 'margin-top:.4rem' }, 'Permanently removes this order and its email records. This cannot be undone.')),
+    ),
   );
   dlg.addEventListener('close', () => {
     history.replaceState(null, '', location.pathname);
@@ -296,14 +305,13 @@ function ensureDialog(id) {
 
 async function viewProducts() {
   const out = panel;
-  const [products, inv] = await Promise.all([loadProducts(true), loadInventory(true)]);
+  const products = await loadProducts(true);
   clear(out).append(
     h('div', { class: 'toolbar' }, h('button', { class: 'btn btn--primary btn--sm', type: 'button', onclick: () => editProduct(null) }, 'New product')),
     h('section', { class: 'panel' }, h('h2', {}, 'Products'),
-      products.length ? h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Product', 'Price', 'Variants', 'Units left', 'Status', ''].map((x) => h('th', { scope: 'col' }, x)))),
+      products.length ? h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Product', 'Price', 'Variants', 'Status', ''].map((x) => h('th', { scope: 'col' }, x)))),
         h('tbody', {}, products.map((p) => {
-          const left = p.variants.filter((v) => v.active).reduce((n, v) => n + (inv.get(stockKey(p.id, v.id)) || 0), 0);
-          return h('tr', { class: 'click', onclick: () => editProduct(p) }, h('td', {}, p.name, p.featured ? ' ★' : ''), h('td', {}, money(p.priceCents)), h('td', {}, String(p.variants.filter((v) => v.active).length)), h('td', {}, String(left)), h('td', {}, tag(p.active ? 'open' : 'inactive', p.active ? 'Active' : 'Inactive')),
+          return h('tr', { class: 'click', onclick: () => editProduct(p) }, h('td', {}, p.name, p.featured ? ' ★' : ''), h('td', {}, money(p.priceCents)), h('td', {}, String(p.variants.filter((v) => v.active).length)), h('td', {}, tag(p.active ? 'open' : 'inactive', p.active ? 'Active' : 'Inactive')),
             h('td', {}, h('button', { class: 'linkbtn', type: 'button', onclick: (e) => { e.stopPropagation(); editProduct(p); } }, 'Edit', h('span', { class: 'sr-only' }, ` ${p.name}`))));
         })))) : h('p', { class: 'empty' }, 'No products yet. Add your first product; nothing appears on the shop until it is active and the store is open.')));
 }
@@ -327,12 +335,11 @@ function resizeImage(file, max = 1600) {
 function editProduct(existing) {
   const { db, fs, storage, st } = F;
   const id = existing ? existing.id : fs.doc(fs.collection(db, 'products')).id;
-  const inv = cache.inventory;
   const m = {
     name: existing ? existing.name : '', description: existing ? existing.description || '' : '',
     price: existing ? (existing.priceCents / 100).toFixed(2) : '', active: existing ? existing.active : false, featured: existing ? existing.featured === true : false,
     images: existing ? (existing.images || []).map((x) => ({ ...x })) : [],
-    variants: existing ? existing.variants.filter((v) => v.active).map((v) => ({ size: v.size, color: v.color, sku: v.sku || '', stock: inv.get(stockKey(id, v.id)) ?? 0, orig: inv.get(stockKey(id, v.id)) ?? 0, active: v.active })) : [],
+    variants: existing ? existing.variants.filter((v) => v.active).map((v) => ({ size: v.size, color: v.color, sku: v.sku || '', active: v.active })) : [],
   };
   const dlg = ensureDialog('product-dlg');
   const err = h('div', { class: 'errsum', role: 'alert', tabindex: '-1', hidden: true });
@@ -363,9 +370,8 @@ function editProduct(existing) {
       h('td', {}, h('input', { type: 'text', value: v.size, 'aria-label': `Size, row ${i + 1}`, maxlength: 30, oninput: (e) => { v.size = e.target.value; } })),
       h('td', {}, h('input', { type: 'text', value: v.color, 'aria-label': `Color, row ${i + 1}`, maxlength: 40, oninput: (e) => { v.color = e.target.value; } })),
       h('td', {}, h('input', { type: 'text', value: v.sku, 'aria-label': `SKU, row ${i + 1}`, maxlength: 60, oninput: (e) => { v.sku = e.target.value; } })),
-      h('td', {}, h('input', { type: 'number', min: 0, step: 1, value: String(v.stock), 'aria-label': `Stock, row ${i + 1}`, oninput: (e) => { v.stock = e.target.value === '' ? NaN : Number(e.target.value); } })),
       h('td', {}, h('button', { class: 'linkbtn', type: 'button', onclick: () => { m.variants.splice(i, 1); drawVariants(); } }, 'Remove', h('span', { class: 'sr-only' }, ` row ${i + 1}`))))));
-    if (!m.variants.length) vBox.append(h('tr', {}, h('td', { colspan: 5, class: 'fine' }, 'No variants yet. Add a row, or generate sizes × colors below.')));
+    if (!m.variants.length) vBox.append(h('tr', {}, h('td', { colspan: 4, class: 'fine' }, 'No variants yet. Add a row, or generate sizes × colors below.')));
   };
   let uploading = 0;
   const upload = h('input', { type: 'file', id: 'p-file', accept: 'image/jpeg,image/png,image/webp,image/avif', multiple: true, onchange: async (e) => {
@@ -396,7 +402,6 @@ function editProduct(existing) {
     if (!String(price.value).trim() || !Number.isFinite(dollars) || dollars < 0 || Math.abs(dollars * 100 - priceCents) > 1e-6) problems.push('Price must be a dollar amount with at most 2 decimals, e.g. 45.00.');
     for (const [i, v] of m.variants.entries()) {
       if (!String(v.size).trim() || !String(v.color).trim()) problems.push(`Variant row ${i + 1}: size and color are required.`);
-      if (!Number.isInteger(v.stock) || v.stock < 0) problems.push(`Variant row ${i + 1}: stock must be a whole number, 0 or more.`);
     }
     const seen = new Set();
     for (const [i, v] of m.variants.entries()) {
@@ -410,7 +415,7 @@ function editProduct(existing) {
       await callable('adminSaveProduct', {
         id, name: name.value.trim(), description: desc.value.trim(), priceCents, active: active.checked, featured: featured.checked,
         images: m.images.map((x) => ({ url: x.url, path: x.path, alt: x.alt || '' })),
-        variants: m.variants.map((v) => ({ size: String(v.size).trim(), color: String(v.color).trim(), sku: String(v.sku || '').trim(), stockQuantity: v.stock, expectedStock: Number.isInteger(v.orig) ? v.orig : undefined, active: true })),
+        variants: m.variants.map((v) => ({ size: String(v.size).trim(), color: String(v.color).trim(), sku: String(v.sku || '').trim(), active: true })),
       });
     } catch (ex) { err.hidden = false; err.textContent = ex.message; err.focus(); return; }
     toast('Product saved');
@@ -427,19 +432,19 @@ function editProduct(existing) {
       h('div', { class: 'checks' }, h('label', { for: 'p-active' }, active, 'Active (visible on the shop)'), h('label', { for: 'p-feat' }, featured, 'Featured (listed first)')),
       h('h3', { style: 'font:400 1.2rem/1 var(--display);letter-spacing:.05em;text-transform:uppercase;margin:1rem 0 .6rem' }, 'Photos'),
       imgBox, h('div', { class: 'field', style: 'margin-top:.8rem' }, h('label', { for: 'p-file' }, 'Add photos (JPEG, PNG, WebP; resized to 1600px)'), upload),
-      h('h3', { style: 'font:400 1.2rem/1 var(--display);letter-spacing:.05em;text-transform:uppercase;margin:1.4rem 0 .6rem' }, 'Sizes, colors & inventory'),
-      h('div', { class: 'tablewrap' }, h('table', { class: 't vtable' }, h('thead', {}, h('tr', {}, ['Size', 'Color', 'SKU (optional)', 'In stock', ''].map((x) => h('th', { scope: 'col' }, x)))), vBox)),
+      h('h3', { style: 'font:400 1.2rem/1 var(--display);letter-spacing:.05em;text-transform:uppercase;margin:1.4rem 0 .6rem' }, 'Sizes & colors'),
+      h('div', { class: 'tablewrap' }, h('table', { class: 't vtable' }, h('thead', {}, h('tr', {}, ['Size', 'Color', 'SKU (optional)', ''].map((x) => h('th', { scope: 'col' }, x)))), vBox)),
       h('div', { class: 'toolbar', style: 'margin-top:.8rem' },
-        h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => { m.variants.push({ size: '', color: '', sku: '', stock: 0, active: true }); drawVariants(); } }, 'Add row'),
+        h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => { m.variants.push({ size: '', color: '', sku: '', active: true }); drawVariants(); } }, 'Add row'),
         h('div', { class: 'field' }, h('label', { for: 'gen-sizes' }, 'Sizes'), sizesIn), h('div', { class: 'field' }, h('label', { for: 'gen-colors' }, 'Colors'), colorsIn),
         h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => {
           const split = (s) => s.split(',').map((x) => x.trim()).filter(Boolean);
           for (const s of split(sizesIn.value)) for (const c of split(colorsIn.value)) {
-            if (!m.variants.some((v) => v.size.toLowerCase() === s.toLowerCase() && v.color.toLowerCase() === c.toLowerCase())) m.variants.push({ size: s, color: c, sku: '', stock: 0, active: true });
+            if (!m.variants.some((v) => v.size.toLowerCase() === s.toLowerCase() && v.color.toLowerCase() === c.toLowerCase())) m.variants.push({ size: s, color: c, sku: '', active: true });
           }
           drawVariants();
         } }, 'Generate sizes × colors')),
-      h('p', { class: 'fine' }, 'Removing a row retires that variant (past orders keep their details). Stock you type here replaces the current count.'),
+      h('p', { class: 'fine' }, 'Removing a row retires that size/color (past orders keep their details). There are no stock counts: every drop is a pre-order and you order exactly what was requested.'),
       h('div', { class: 'row-actions', style: 'margin-top:1.4rem' }, save, h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => dlg.close() }, 'Cancel')),
     ));
   drawImages(); drawVariants();
@@ -496,7 +501,8 @@ function editSchedule(s) {
 
 async function viewSettings() {
   const { db, fs } = F; const out = panel;
-  const [snap, mailCfg] = await Promise.all([fs.getDoc(fs.doc(db, 'settings', 'public')), callable('adminGetMailConfig', {})]);
+  const snap = await fs.getDoc(fs.doc(db, 'settings', 'public'));
+  const mailHolder = h('div', {}, h('section', { class: 'panel' }, h('h2', {}, 'Email (Make.com)'), h('p', { class: 'empty' }, 'Loading email settings...')));
   const cur = snap.exists() ? snap.data() : { fulfillmentMethods: [], checkoutNotice: '' };
   const methods = (cur.fulfillmentMethods || []).map((x) => ({ ...x }));
   const box = h('div', {});
@@ -521,10 +527,12 @@ async function viewSettings() {
       box, h('button', { class: 'btn btn--ghost btn--sm', type: 'button', style: 'margin-top:.8rem', onclick: () => { methods.push({ id: '', label: '', requiresDetails: false, detailsLabel: '', enabled: true }); draw(); } }, 'Add option'),
       h('div', { class: 'field', style: 'margin-top:1.2rem' }, h('label', { for: 'set-notice' }, 'Extra checkout notice (optional): shown above the Submit button, e.g. pickup or payment instructions once decided'), notice),
       save),
-    mailPanel(mailCfg),
+    mailHolder,
     h('section', { class: 'panel' }, h('h2', {}, 'Administrators'), h('p', { class: 'fine' }, 'Admin access is granted only by the site owner from a terminal, never from this page: ', h('code', { class: 'mono' }, 'node scripts/set-admin.js add person@example.com'), '. See the README, "Adding and removing administrators".')),
   );
   draw();
+  callable('adminGetMailConfig', {}).then((cfg) => mailHolder.replaceChildren(mailPanel(cfg)))
+    .catch((e) => mailHolder.replaceChildren(h('section', { class: 'panel' }, h('div', { class: 'notice notice--error', role: 'alert' }, 'Could not load email settings: ' + e.message))));
 }
 
 function mailPanel(cfg) {

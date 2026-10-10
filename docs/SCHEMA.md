@@ -21,13 +21,11 @@ rules allow (see `firestore.rules`). Field names marked **(private)** are never 
 |---|---|---|
 | `sku` | string \| null | optional |
 | `size`, `color` | string | |
-| `active` | bool | removing a row in the admin editor sets this to `false` (history is kept) |
-| `inStock` | bool | `active && stock > 0`, kept in sync by the functions. The **count** is not public |
+| `active` | bool | removing a row in the admin editor sets this to `false` (history is kept). There are no stock counts: drops are pre-orders |
 | `createdAt`, `updatedAt` | timestamp | |
 
-## `inventory/{productId}__{variantId}`  (private, admin read)
-`{ productId, variantId, stockQuantity (int >= 0), updatedAt }`. The only authoritative stock count. Decremented inside the order
-transaction; restored (once) on cancellation.
+## `inventory/*`  (legacy, unused)
+Earlier versions tracked stock here. Nothing reads or writes it any more; the rules still deny public access.
 
 ## `storeSchedules/{scheduleId}`  (private, admin read; public status comes from the `getStoreStatus` function)
 | field | type | notes |
@@ -61,7 +59,6 @@ Empty by default. When empty, orders record `fulfillmentMethod: "arranged_separa
 | `subtotalCents`, `currency` | |
 | `status` | `submitted → confirmed → preparing → ready → fulfilled`, or `cancelled` |
 | `paymentStatus` | always `"not_collected_online"`. The system never marks an order paid |
-| `inventoryRestored` | guards "restore stock at most once" |
 | `statusHistory[]` | `{status, byUid, atMillis}` |
 | `notificationStatus` | `{admin, customer}`: `pending / retrying / sent / failed` |
 | `createdAt`, `updatedAt` | |
@@ -75,9 +72,9 @@ Empty by default. When empty, orders record `fulfillmentMethod: "arranged_separa
 | ready | fulfilled, cancelled |
 | fulfilled, cancelled | none (terminal) |
 
-**Cancellation policy:** cancelling any non-terminal order returns its quantities to inventory exactly once (guarded by
-`inventoryRestored` inside the same transaction) and re-enables the variants. A fulfilled order cannot be cancelled.
-No status change implies payment.
+**Cancellation policy:** a non-terminal order can be cancelled (the customer is emailed). A fulfilled order cannot be cancelled. No status change implies payment.
+
+**Deleting:** `adminDeleteOrder` permanently removes an order and its `mail` records (admin only, irreversible, no email sent).
 
 ## `mail/{orderId}_{admin|customer|status_N}`  (private, admin read)
 Durable email queue. Written **in the same transaction as the order** (or the status change).

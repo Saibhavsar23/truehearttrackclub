@@ -26,12 +26,12 @@ async function signIn(email) {
   return (await r.json()).idToken;
 }
 
-const product = () => ({ name: 'Callable Tee', description: '', priceCents: 2000, active: true, images: [], variants: [{ size: 'M', color: 'Red', stockQuantity: 3 }] });
+const product = () => ({ name: 'Callable Tee', description: '', priceCents: 2000, active: true, images: [], variants: [{ size: 'M', color: 'Red' }] });
 
 test.before(async () => { await wipeFirestore(); });
 
 test('admin operations reject anonymous callers', async () => {
-  for (const fn of ['adminSaveProduct', 'adminSaveSchedule', 'adminDeleteSchedule', 'adminSaveSettings', 'adminUpdateOrderStatus', 'adminResendMail', 'adminGetMailConfig', 'adminSaveMailWebhook', 'adminSendTestMail']) {
+  for (const fn of ['adminSaveProduct', 'adminSaveSchedule', 'adminDeleteSchedule', 'adminSaveSettings', 'adminUpdateOrderStatus', 'adminDeleteOrder', 'adminResendMail', 'adminGetMailConfig', 'adminSaveMailWebhook', 'adminSendTestMail']) {
     const r = await call(fn, {});
     assert.equal(r.body.error && r.body.error.status, 'PERMISSION_DENIED', fn);
   }
@@ -94,8 +94,7 @@ test('submitOrder through the callable succeeds while open, and a hostile payloa
   });
   assert.equal(good.body.result.subtotalCents, 4000);
   assert.equal(good.body.result.orderNumber, 'THTC-00001');
-  const inv = (await db.collection('inventory').get()).docs[0].data();
-  assert.equal(inv.stockQuantity, 1);
+  assert.equal((await db.collection('orders').get()).size, 1);
 });
 
 test('admin can store the Make webhook; it is validated server-side and never echoed back', async () => {

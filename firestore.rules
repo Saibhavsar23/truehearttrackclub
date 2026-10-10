@@ -14,7 +14,7 @@ service cloud.firestore {
       allow read: if resource.data.active == true || isAdmin();
       allow write: if false;
 
-      // Public variants expose availability only as a boolean (inStock), never the stock count.
+      // Public variants are readable when the variant and its product are active. (inventory/* is legacy and unused.)
       match /variants/{variantId} {
         allow read: if isAdmin() ||
           (resource.data.active == true &&

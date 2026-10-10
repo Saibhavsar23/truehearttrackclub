@@ -29,51 +29,42 @@ async function openSchedule(opens = Date.now() - 3600e3, closes = Date.now() + 3
   await ref.set({ name: 'Test drop', active, opensAt: new Date(opens), closesAt: new Date(closes), createdAt: new Date(), updatedAt: new Date() });
   return ref.id;
 }
-async function makeProduct(stock = 5, over = {}) {
+async function makeProduct(over = {}) {
   const r = await svc.adminSaveProduct(db, 'adminuid', {
     name: 'Team Hoodie', description: 'Warm', priceCents: 4500, active: true, images: [],
-    variants: [{ size: 'M', color: 'Black', stockQuantity: stock }, { size: 'L', color: 'Black', stockQuantity: 2 }],
+    variants: [{ size: 'M', color: 'Black' }, { size: 'L', color: 'Black' }],
     ...over,
   });
   return r.id;
 }
-const stockOf = async (pid, vid) => (await db.collection('inventory').doc(`${pid}__${vid}`).get()).data().stockQuantity;
 const M_BLACK = 'm__black';
 
 test.beforeEach(async () => { await wipeFirestore(); });
 
-test('product save writes public variant docs WITHOUT stock counts, and private inventory', async () => {
-  const pid = await makeProduct(5);
+test('product save writes public variant docs and no inventory records at all', async () => {
+  const pid = await makeProduct();
   const v = (await db.doc(`products/${pid}/variants/${M_BLACK}`).get()).data();
-  assert.equal(v.inStock, true);
+  assert.equal(v.active, true);
   assert.equal('stockQuantity' in v, false);
-  assert.equal(await stockOf(pid, M_BLACK), 5);
+  assert.equal('inStock' in v, false);
+  assert.equal((await db.collection('inventory').get()).size, 0);
 });
 
-test('editing a product does not overwrite stock that changed while the editor was open; an explicit change still wins', async () => {
-  await openSchedule();
-  const pid = await makeProduct(5);
-  await svc.submitOrder(db, orderReq(pid, M_BLACK, 2), ctx());          // 5 -> 3 while an admin has the editor open (it showed 5)
-  const edit = (stockQuantity, expectedStock) => svc.adminSaveProduct(db, 'adminuid', {
-    id: pid, name: 'Team Hoodie v2', description: '', priceCents: 4500, active: true, images: [],
-    variants: [{ size: 'M', color: 'Black', stockQuantity, expectedStock }, { size: 'L', color: 'Black', stockQuantity: 2, expectedStock: 2 }],
-  });
-  await edit(5, 5);                                                      // admin only renamed it: stock untouched, so keep the live 3
-  assert.equal(await stockOf(pid, M_BLACK), 3);
-  await edit(10, 5);                                                     // admin typed a new count: that wins
-  assert.equal(await stockOf(pid, M_BLACK), 10);
-  assert.equal((await db.doc(`products/${pid}/variants/${M_BLACK}`).get()).data().inStock, true);
+test('removing a size/color in the editor retires that variant instead of deleting it', async () => {
+  const pid = await makeProduct();
+  await svc.adminSaveProduct(db, 'adminuid', { id: pid, name: 'Team Hoodie', description: '', priceCents: 4500, active: true, images: [], variants: [{ size: 'M', color: 'Black' }] });
+  assert.equal((await db.doc(`products/${pid}/variants/l__black`).get()).data().active, false);
+  assert.equal((await db.doc(`products/${pid}/variants/${M_BLACK}`).get()).data().active, true);
 });
 
-test('successful order: authoritative pricing, stock decremented, order + 2 mail jobs + counter committed', async () => {
+test('successful order: authoritative pricing, order + 2 mail jobs + counter committed', async () => {
   await openSchedule();
-  const pid = await makeProduct(5);
+  const pid = await makeProduct();
   const req = orderReq(pid, M_BLACK, 2);
   req.items[0].priceCents = 1; req.subtotalCents = 1; // hostile client values must be ignored
   const res = await svc.submitOrder(db, req, ctx());
   assert.equal(res.orderNumber, 'THTC-00001');
   assert.equal(res.subtotalCents, 9000);
-  assert.equal(await stockOf(pid, M_BLACK), 3);
   const orders = await db.collection('orders').get();
   assert.equal(orders.size, 1);
   const o = orders.docs[0].data();
@@ -94,13 +85,13 @@ test('order snapshot is immutable when the product later changes', async () => {
   await openSchedule();
   const pid = await makeProduct(5);
   await svc.submitOrder(db, orderReq(pid, M_BLACK, 1), ctx());
-  await svc.adminSaveProduct(db, 'adminuid', { id: pid, name: 'Renamed', description: '', priceCents: 9999, active: true, images: [], variants: [{ size: 'M', color: 'Black', stockQuantity: 4 }] });
+  await svc.adminSaveProduct(db, 'adminuid', { id: pid, name: 'Renamed', description: '', priceCents: 9999, active: true, images: [], variants: [{ size: 'M', color: 'Black' }] });
   const o = (await db.collection('orders').get()).docs[0].data();
   assert.equal(o.items[0].productName, 'Team Hoodie');
   assert.equal(o.items[0].unitPriceCents, 4500);
 });
 
-test('idempotency: same key returns the same order and decrements stock once', async () => {
+test('idempotency: same key returns the same order and never creates a second one', async () => {
   await openSchedule();
   const pid = await makeProduct(5);
   const req = orderReq(pid, M_BLACK, 2);
@@ -108,14 +99,12 @@ test('idempotency: same key returns the same order and decrements stock once', a
   const b = await svc.submitOrder(db, req, ctx());
   assert.equal(b.orderNumber, a.orderNumber);
   assert.equal(b.duplicate, true);
-  assert.equal(await stockOf(pid, M_BLACK), 3);
   assert.equal((await db.collection('orders').get()).size, 1);
   assert.equal((await db.collection('mail').get()).size, 2);
   // concurrent double-click
   const req2 = orderReq(pid, M_BLACK, 1);
   const [x, y] = await Promise.all([svc.submitOrder(db, req2, ctx()), svc.submitOrder(db, req2, ctx())]);
   assert.equal(x.orderNumber, y.orderNumber);
-  assert.equal(await stockOf(pid, M_BLACK), 2);
   assert.equal((await db.collection('orders').get()).size, 2);
 });
 
@@ -127,42 +116,35 @@ test('idempotency key reused for a different cart is rejected', async () => {
   await assert.rejects(svc.submitOrder(db, { ...req, items: [{ productId: pid, variantId: M_BLACK, quantity: 3 }] }, ctx()), (e) => e.code === 'already-exists');
 });
 
-test('concurrent orders never oversell', async () => {
+test('pre-order drop: there is no stock limit, every order for an active size/color is accepted with unique order numbers', async () => {
   await openSchedule();
-  const pid = await makeProduct(3);
-  const attempts = Array.from({ length: 9 }, (_, i) => svc.submitOrder(db, orderReq(pid, M_BLACK, 1), ctx({ ip: `10.0.0.${i}` })).then(() => 'ok', (e) => e.code));
-  const results = await Promise.all(attempts);
-  const ok = results.filter((r) => r === 'ok').length;
-  assert.equal(ok, 3, JSON.stringify(results));
-  assert.equal(await stockOf(pid, M_BLACK), 0);
-  assert.equal((await db.collection('orders').get()).size, 3);
-  const v = (await db.doc(`products/${pid}/variants/${M_BLACK}`).get()).data();
-  assert.equal(v.inStock, false);
-  for (const r of results.filter((r) => r !== 'ok')) assert.equal(r, 'failed-precondition');
+  const pid = await makeProduct();
+  const results = await Promise.all(Array.from({ length: 12 }, (_, i) => svc.submitOrder(db, orderReq(pid, M_BLACK, 9), ctx({ ip: `10.0.0.${i}` })).then((r) => r.orderNumber, (e) => e.code)));
+  assert.equal(new Set(results).size, 12, JSON.stringify(results));
+  assert.ok(results.every((r) => /^THTC-\d{5}$/.test(r)));
+  assert.equal((await db.collection('orders').get()).size, 12);
 });
 
-test('insufficient stock, inactive and unknown items are rejected with details; nothing is written', async () => {
+test('inactive and unknown items are rejected with details; nothing is written', async () => {
   await openSchedule();
-  const pid = await makeProduct(1);
-  await assert.rejects(svc.submitOrder(db, orderReq(pid, M_BLACK, 2), ctx()), (e) => e.code === 'failed-precondition' && e.details.problems[0].reason === 'insufficient_stock' && e.details.problems[0].available === 1);
-  await assert.rejects(svc.submitOrder(db, orderReq(pid, 'xxl__pink', 1), ctx()), (e) => e.details.problems[0].reason === 'product_unavailable' || e.details.problems[0].reason === 'variant_unavailable');
-  const draft = await makeProduct(5, { active: false });
+  const pid = await makeProduct();
+  await assert.rejects(svc.submitOrder(db, orderReq(pid, 'xxl__pink', 1), ctx()), (e) => e.code === 'failed-precondition' && ['product_unavailable', 'variant_unavailable'].includes(e.details.problems[0].reason));
+  const draft = await makeProduct({ active: false });
   await assert.rejects(svc.submitOrder(db, orderReq(draft, M_BLACK, 1), ctx()), (e) => e.details.problems[0].reason === 'product_unavailable');
-  assert.equal(await stockOf(pid, M_BLACK), 1);
   assert.equal((await db.collection('orders').get()).size, 0);
 });
 
-test('an order with one bad line is rejected as a whole and stock for good lines is untouched', async () => {
+test('an order with one bad line is rejected as a whole', async () => {
   await openSchedule();
-  const pid = await makeProduct(5);
+  const pid = await makeProduct();
   const req = orderReq(pid, M_BLACK, 1);
-  req.items.push({ productId: pid, variantId: 'l__black', quantity: 5 }); // only 2 in stock
+  req.items.push({ productId: pid, variantId: 'xxl__pink', quantity: 1 });
   await assert.rejects(svc.submitOrder(db, req, ctx()), (e) => e.code === 'failed-precondition');
-  assert.equal(await stockOf(pid, M_BLACK), 5);
+  assert.equal((await db.collection('orders').get()).size, 0);
 });
 
 test('closed store: before opening, at closing instant, after closing and with no schedule', async () => {
-  const pid = await makeProduct(50);
+  const pid = await makeProduct();
   const t = Date.UTC(2026, 5, 1, 15, 0, 0);
   const at = (ms) => ctx({ now: () => ms, ip: `9.9.9.${ms % 250}` });
   await assert.rejects(svc.submitOrder(db, orderReq(pid, M_BLACK, 1), at(t)), (e) => e.details.reason === 'store_closed'); // no schedule at all
@@ -172,7 +154,7 @@ test('closed store: before opening, at closing instant, after closing and with n
   await assert.doesNotReject(svc.submitOrder(db, orderReq(pid, M_BLACK, 1), at(t + 3600e3 - 1)));
   await assert.rejects(svc.submitOrder(db, orderReq(pid, M_BLACK, 1), at(t + 3600e3)), (e) => e.details.reason === 'store_closed'); // closesAt is exclusive
   await assert.rejects(svc.submitOrder(db, orderReq(pid, M_BLACK, 1), at(t + 7200e3)), (e) => e.details.reason === 'store_closed');
-  assert.equal(await stockOf(pid, M_BLACK), 48);
+  assert.equal((await db.collection('orders').get()).size, 2);
 });
 
 test('inactive schedules never open the store; schedule edits apply without redeploying', async () => {
@@ -229,9 +211,9 @@ test('a currently open schedule cannot be deleted; a closed one can', async () =
 
 /* ------------------------- admin: order lifecycle ------------------------- */
 
-async function placeOrder(qty = 2, stock = 5) {
+async function placeOrder(qty = 2) {
   await openSchedule();
-  const pid = await makeProduct(stock);
+  const pid = await makeProduct();
   const res = await svc.submitOrder(db, orderReq(pid, M_BLACK, qty), ctx());
   const order = (await db.collection('orders').get()).docs[0];
   return { pid, orderId: order.id, res };
@@ -251,20 +233,27 @@ test('status transitions are validated; status emails never claim payment/shippi
   for (const m of statusMail) assert.doesNotMatch(m.text, /shipped|delivered|has been paid|payment received/i);
 });
 
-test('cancellation restores inventory exactly once and re-enables the variant', async () => {
-  const { pid, orderId } = await placeOrder(5, 5);
-  assert.equal(await stockOf(pid, M_BLACK), 0);
-  assert.equal((await db.doc(`products/${pid}/variants/${M_BLACK}`).get()).data().inStock, false);
+test('cancelling is final and emails the customer; a cancelled order cannot change again', async () => {
+  const { orderId } = await placeOrder();
   await svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled');
-  assert.equal(await stockOf(pid, M_BLACK), 5);
-  assert.equal((await db.doc(`products/${pid}/variants/${M_BLACK}`).get()).data().inStock, true);
   await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled'), (e) => e.code === 'failed-precondition');
-  // concurrent cancels cannot double-restore
-  const second = await svc.submitOrder(db, orderReq(pid, M_BLACK, 2), ctx({ ip: '2.2.2.2' }));
-  const id2 = (await db.collection('orders').where('orderNumber', '==', second.orderNumber).get()).docs[0].id;
-  const r = await Promise.allSettled([svc.adminUpdateOrderStatus(db, 'u', id2, 'cancelled'), svc.adminUpdateOrderStatus(db, 'u', id2, 'cancelled')]);
-  assert.equal(r.filter((x) => x.status === 'fulfilled').length, 1);
-  assert.equal(await stockOf(pid, M_BLACK), 5);
+  await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'confirmed'), (e) => e.code === 'failed-precondition');
+  assert.equal((await db.doc(`orders/${orderId}`).get()).data().status, 'cancelled');
+  assert.equal((await db.collection('mail').where('kind', '==', 'customer_status').get()).size, 1);
+});
+
+test('an order can be deleted completely, together with its email records; nothing else is touched', async () => {
+  const { orderId, pid } = await placeOrder();
+  await svc.submitOrder(db, orderReq(pid, M_BLACK, 1), ctx({ ip: '4.4.4.4' }));       // a second order that must survive
+  assert.equal((await db.collection('orders').get()).size, 2);
+  const out = await svc.adminDeleteOrder(db, orderId);
+  assert.equal(out.deleted, true);
+  assert.equal((await db.doc(`orders/${orderId}`).get()).exists, false);
+  assert.equal((await db.collection('mail').where('orderId', '==', orderId).get()).size, 0);
+  assert.equal((await db.collection('orders').get()).size, 1);
+  assert.equal((await db.collection('mail').get()).size, 2);
+  await assert.rejects(svc.adminDeleteOrder(db, orderId), (e) => e.code === 'not-found');
+  await assert.rejects(svc.adminDeleteOrder(db, '../x'), (e) => e.code === 'invalid-argument');
 });
 
 /* --------------------------------- mail queue --------------------------------- */

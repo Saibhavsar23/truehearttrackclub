@@ -13,7 +13,6 @@ const W = require('./webhook');
 const { HttpError } = L;
 const RATE = { windowMs: 10 * 60 * 1000, perIp: 10, perEmail: 5 };
 
-const invId = (pid, vid) => `${pid}__${vid}`;
 const toDate = (ms) => new Date(ms);
 
 /* -------------------------------- schedules -------------------------------- */
@@ -131,8 +130,7 @@ async function adminSaveProduct(db, uid, raw) {
   if (p.active && p.variants.filter((v) => v.active).length === 0) throw new HttpError('invalid-argument', 'Add at least one active size/color variant before activating a product.');
 
   return db.runTransaction(async (tx) => {
-    const invRefs = p.variants.map((v) => db.collection('inventory').doc(invId(id, v.id)));
-    const [psnap, vsnap, invSnaps] = await Promise.all([tx.get(pref), tx.get(pref.collection('variants')), invRefs.length ? tx.getAll(...invRefs) : Promise.resolve([])]);
+    const [psnap, vsnap] = await Promise.all([tx.get(pref), tx.get(pref.collection('variants'))]);
     const now = FieldValue.serverTimestamp();
     const newIds = new Set(p.variants.map((v) => v.id));
     tx.set(pref, {
@@ -148,21 +146,14 @@ async function adminSaveProduct(db, uid, raw) {
       updatedAt: now,
       updatedBy: uid,
     });
-    p.variants.forEach((v, i) => {
+    p.variants.forEach((v) => {
       const vref = pref.collection('variants').doc(v.id);
       const prev = vsnap.docs.find((d) => d.id === v.id);
-      // If the admin did not change this count since opening the editor, keep the live count (orders may have been placed meanwhile).
-      const cur = invSnaps[i].exists ? invSnaps[i].data().stockQuantity : null;
-      const stock = (v.expectedStock !== null && cur !== null && v.stockQuantity === v.expectedStock) ? cur : v.stockQuantity;
-      tx.set(vref, {
-        sku: v.sku, size: v.size, color: v.color, active: v.active, inStock: v.active && stock > 0,
-        createdAt: prev ? prev.data().createdAt : now, updatedAt: now,
-      });
-      tx.set(invRefs[i], { productId: id, variantId: v.id, stockQuantity: stock, updatedAt: now });
+      tx.set(vref, { sku: v.sku, size: v.size, color: v.color, active: v.active, createdAt: prev ? prev.data().createdAt : now, updatedAt: now });
     });
     // Variants removed in the editor are retired (kept for history) rather than deleted.
     for (const d of vsnap.docs) {
-      if (!newIds.has(d.id) && d.data().active) tx.update(d.ref, { active: false, inStock: false, updatedAt: now });
+      if (!newIds.has(d.id) && d.data().active) tx.update(d.ref, { active: false, updatedAt: now });
     }
     return { id };
   });
@@ -224,7 +215,7 @@ function orderForMail(id, o, createdAtMillis) {
 }
 
 /**
- * Create an order. All-or-nothing: validation, schedule check, authoritative pricing, stock decrement,
+ * Create an order. All-or-nothing: validation, schedule check, authoritative pricing,
  * order document, mail jobs and idempotency record commit together or not at all.
  */
 async function submitOrder(db, data, ctx) {
@@ -259,15 +250,15 @@ async function submitOrder(db, data, ctx) {
     const refs = [];
     for (const it of req.items) {
       const pref = db.collection('products').doc(it.productId);
-      refs.push(pref, pref.collection('variants').doc(it.variantId), db.collection('inventory').doc(invId(it.productId, it.variantId)));
+      refs.push(pref, pref.collection('variants').doc(it.variantId));
     }
     const snaps = await tx.getAll(...refs);
     const counter = await tx.get(counterRef);
 
     const lookup = (pid, vid) => {
       const idx = req.items.findIndex((i) => i.productId === pid && i.variantId === vid);
-      const [p, v, inv] = snaps.slice(idx * 3, idx * 3 + 3);
-      return { product: p.exists ? p.data() : undefined, variant: v.exists ? v.data() : undefined, stock: inv.exists ? inv.data().stockQuantity : 0 };
+      const [p, v] = snaps.slice(idx * 2, idx * 2 + 2);
+      return { product: p.exists ? p.data() : undefined, variant: v.exists ? v.data() : undefined };
     };
     const priced = L.priceOrder(req.items, lookup);
     if (priced.problems.length) {
@@ -287,12 +278,6 @@ async function submitOrder(db, data, ctx) {
     };
 
     // ---- writes ----
-    req.items.forEach((it, idx) => {
-      const [, v, inv] = snaps.slice(idx * 3, idx * 3 + 3);
-      const remaining = inv.data().stockQuantity - it.quantity;
-      tx.update(inv.ref, { stockQuantity: remaining, updatedAt: nowDate });
-      if (remaining <= 0 && v.data().inStock) tx.update(v.ref, { inStock: false, updatedAt: nowDate });
-    });
     const orderDoc = {
       orderNumber,
       customerName: req.customerName,
@@ -305,7 +290,6 @@ async function submitOrder(db, data, ctx) {
       currency: 'USD',
       status: 'submitted',
       paymentStatus: 'not_collected_online',
-      inventoryRestored: false,
       statusHistory: [{ status: 'submitted', byUid: null, atMillis: nowMs }],
       notificationStatus: { admin: 'pending', customer: 'pending' },
       createdAt: nowDate,
@@ -336,26 +320,7 @@ async function adminUpdateOrderStatus(db, uid, orderId, newStatus, now = () => D
     if (!L.canTransition(o.status, newStatus)) throw new HttpError('failed-precondition', `An order that is "${o.status}" cannot be changed to "${newStatus}".`);
     const nowMs = now();
     const nowDate = toDate(nowMs);
-    let restoreSnaps = [];
-    if (newStatus === 'cancelled' && !o.inventoryRestored) {
-      const refs = [];
-      for (const it of o.items) {
-        refs.push(db.collection('inventory').doc(invId(it.productId, it.variantId)), db.collection('products').doc(it.productId).collection('variants').doc(it.variantId));
-      }
-      restoreSnaps = await tx.getAll(...refs);
-    }
     const patch = { status: newStatus, updatedAt: nowDate, statusHistory: [...(o.statusHistory || []), { status: newStatus, byUid: uid, atMillis: nowMs }] };
-    if (newStatus === 'cancelled' && !o.inventoryRestored) {
-      // Restored exactly once: guarded by the inventoryRestored flag in the same transaction.
-      o.items.forEach((it, i) => {
-        const inv = restoreSnaps[i * 2];
-        const v = restoreSnaps[i * 2 + 1];
-        const stock = (inv.exists ? inv.data().stockQuantity : 0) + it.quantity;
-        tx.set(inv.ref, { productId: it.productId, variantId: it.variantId, stockQuantity: stock, updatedAt: nowDate });
-        if (v.exists && v.data().active) tx.update(v.ref, { inStock: stock > 0, updatedAt: nowDate });
-      });
-      patch.inventoryRestored = true;
-    }
     tx.update(ref, patch);
     const tpl = M.customerStatus(o, newStatus);
     if (tpl) {
@@ -367,6 +332,20 @@ async function adminUpdateOrderStatus(db, uid, orderId, newStatus, now = () => D
     }
     return { status: newStatus };
   });
+}
+
+/** Permanently delete an order and its email records. Admin-only (checked by the caller). */
+async function adminDeleteOrder(db, orderId) {
+  if (typeof orderId !== 'string' || !/^[A-Za-z0-9]{10,40}$/.test(orderId)) throw new HttpError('invalid-argument', 'Invalid order id.');
+  const ref = db.collection('orders').doc(orderId);
+  const snap = await ref.get();
+  if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
+  const mail = await db.collection('mail').where('orderId', '==', orderId).get();
+  const batch = db.batch();
+  mail.docs.forEach((d) => batch.delete(d.ref));
+  batch.delete(ref);
+  await batch.commit();
+  return { deleted: true, orderNumber: snap.data().orderNumber };
 }
 
 async function adminResendMail(db, mailId, now = () => Date.now()) {
@@ -383,6 +362,6 @@ async function adminResendMail(db, mailId, now = () => Date.now()) {
 
 module.exports = {
   RATE, getStoreStatus, adminSaveSchedule, adminDeleteSchedule, getPublicSettings, adminSaveSettings,
-  adminSaveProduct, submitOrder, adminUpdateOrderStatus, adminResendMail, scheduleFromDoc,
+  adminSaveProduct, submitOrder, adminUpdateOrderStatus, adminDeleteOrder, adminResendMail, scheduleFromDoc,
   getMailWebhook, adminGetMailConfig, adminSaveMailWebhook, adminSendTestMail,
 };

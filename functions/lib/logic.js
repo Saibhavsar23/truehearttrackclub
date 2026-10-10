@@ -112,8 +112,8 @@ function validateOrderRequest(data, settings) {
 }
 
 /**
- * Build order line snapshots from AUTHORITATIVE product/variant/stock data and compute totals in integer cents.
- * `lookup(productId, variantId)` returns { product, variant, stock } (any may be undefined).
+ * Build order line snapshots from AUTHORITATIVE product/variant data and compute totals in integer cents.
+ * `lookup(productId, variantId)` returns { product, variant } (either may be undefined).
  * Collects every problem so the client can fix the cart in one pass.
  */
 function priceOrder(items, lookup) {
@@ -121,11 +121,9 @@ function priceOrder(items, lookup) {
   const lines = [];
   let subtotalCents = 0;
   for (const it of items) {
-    const { product, variant, stock } = lookup(it.productId, it.variantId);
+    const { product, variant } = lookup(it.productId, it.variantId);
     if (!product || product.active !== true) { problems.push({ productId: it.productId, variantId: it.variantId, reason: 'product_unavailable' }); continue; }
     if (!variant || variant.active !== true) { problems.push({ productId: it.productId, variantId: it.variantId, reason: 'variant_unavailable' }); continue; }
-    const available = Number.isInteger(stock) ? stock : 0;
-    if (available < it.quantity) { problems.push({ productId: it.productId, variantId: it.variantId, reason: 'insufficient_stock', available: Math.max(0, available) }); continue; }
     const unit = product.priceCents;
     if (!Number.isInteger(unit) || unit < 0 || unit > LIMITS.priceMaxCents) { problems.push({ productId: it.productId, variantId: it.variantId, reason: 'product_unavailable' }); continue; }
     const lineTotal = unit * it.quantity;
@@ -186,10 +184,8 @@ function validateProductInput(data) {
     const id = variantIdFor(size, color);
     if (!id || seen.has(id)) throw new HttpError('invalid-argument', `Duplicate variant: ${size} / ${color}.`);
     seen.add(id);
-    if (!Number.isInteger(v.stockQuantity) || v.stockQuantity < 0 || v.stockQuantity > 100000) throw new HttpError('invalid-argument', `Stock for ${size} / ${color} must be a whole number of 0 or more.`);
     const sku = cleanText(v.sku, 60, 'SKU');
-    // expectedStock = the count the admin saw when opening the editor; lets the server keep orders that arrived meanwhile
-    variants.push({ id, size, color, sku: sku || null, stockQuantity: v.stockQuantity, expectedStock: Number.isInteger(v.expectedStock) ? v.expectedStock : null, active: v.active !== false });
+    variants.push({ id, size, color, sku: sku || null, active: v.active !== false });
   }
   return { name, description, priceCents: data.priceCents, images, variants, active: data.active === true, featured: data.featured === true };
 }

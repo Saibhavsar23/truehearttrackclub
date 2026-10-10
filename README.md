@@ -15,7 +15,7 @@ a storefront at `/shop/`, an admin dashboard at `/admin/`, and a Firebase backen
 | Existing site (design, content, nav, links) | Unchanged except 13 lines: Shop links in nav/menu/footer + a cart-count badge (`git diff main -- index.html`) |
 | Storefront (catalog, variants, cart, checkout, confirmation, closed page, empty/loading/error states) | Implemented. Driven end to end in a browser against the emulators |
 | Cart persistence (localStorage, stale-item handling) | Implemented. Verified across reload |
-| Order backend (validation, authoritative pricing, schedule check, atomic stock, idempotency, rate limit) | Implemented and tested (30 emulator tests incl. 9 concurrent orders vs 3 in stock) |
+| Order backend (validation, authoritative pricing, schedule check, idempotency, rate limit) | Implemented and tested (emulator tests incl. 12 concurrent orders) |
 | Store schedules (New York time, DST, overlap rules, server-side enforcement) | Implemented and tested (spring-forward gap, fall-back overlap, 23 h / 25 h days, open/close boundaries) |
 | Admin dashboard (overview, orders, products + photo upload, schedules, settings) | Implemented. Exercised in a browser against the emulators |
 | Admin authorization (custom claim, re-checked server-side on every call; rules deny all client writes) | Implemented and tested (6 callable tests, 7 rules tests incl. Storage) |
@@ -40,8 +40,9 @@ Browser (Vercel, static files)                 Firebase (separate backend)
 * **No build step.** Plain static files + ES modules; the Firebase web SDK loads from `gstatic.com` pinned to `11.10.0`.
   Vercel keeps deploying `main` exactly as before.
 * **Browsers cannot write to Firestore at all.** `firestore.rules` allows only reads (public catalog; admin-only orders,
-  inventory, mail, schedules). Everything else is denied and tested.
-* **Stock counts are private.** The public variant doc has only an `inStock` boolean.
+  mail, schedules). Everything else is denied and tested.
+* **There is no inventory.** Every drop is a pre-order: the shop is open for a window, then you order exactly what was requested.
+  Admin → Overview → "What to order" totals every non-cancelled order per product / size / color.
 * The **server** recomputes prices from the database; client prices/subtotals are ignored. See [`docs/SCHEMA.md`](docs/SCHEMA.md).
 
 ### What changed in the repo
@@ -177,14 +178,14 @@ Requires Java (for the Firestore emulator) and `firebase-tools`. The tests use a
 
 ## How the important behaviours work
 * **Order submission** (`submitOrder`): validates input → rate-limits (IP, email) → in **one Firestore transaction**: idempotency check,
-  store-open check with server time, read product/variant/stock, price in integer cents, reject if anything is inactive/short,
-  decrement stock, write the order + two email jobs + counter + idempotency record. Nothing is partially applied. The cart is
+  store-open check with server time, read product/variant, price in integer cents, reject if anything is inactive or removed,
+  write the order + two email jobs + counter + idempotency record. Nothing is partially applied. The cart is
   cleared in the browser only after success. Emails are sent *after* the order is committed.
 * **Duplicate submissions:** the browser keeps one idempotency key per unchanged cart; retries/double-clicks return the same order.
 * **Closing mid-checkout:** orders are rejected at/after `closesAt` regardless of the page state; the browser keeps the cart and switches to
   the closed view.
-* **Stale carts:** prices refresh from the live catalog; sold-out or removed items are flagged and block checkout until removed;
-  server-side "only N left" errors adjust quantities.
+* **Stale carts:** prices refresh from the live catalog; removed items are flagged and block checkout until removed.
+* **Deleting orders:** Admin → Orders → open an order → "Delete order permanently" erases it and its email records (no email is sent).
 * **Fulfillment** is deliberately undecided: Admin → Settings lets you define options (pickup, shipping...) later with no code change.
   Nothing (rates, locations, payment instructions) is invented.
 * **Emails:** new-order (to `ADMIN_EMAIL`), customer confirmation (states payment was not collected), and status updates

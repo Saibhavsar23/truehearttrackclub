@@ -60,9 +60,9 @@ test('configured fulfillment methods are enforced', () => {
 });
 
 const catalog = {
-  'p1/a': { product: { active: true, name: 'Hoodie', priceCents: 4500 }, variant: { active: true, size: 'M', color: 'Black', sku: 'H-M-BLK' }, stock: 5 },
-  'p1/b': { product: { active: true, name: 'Hoodie', priceCents: 4500 }, variant: { active: true, size: 'L', color: 'Black' }, stock: 1 },
-  'p2/a': { product: { active: false, name: 'Hidden', priceCents: 100 }, variant: { active: true, size: 'S', color: 'Red' }, stock: 9 },
+  'p1/a': { product: { active: true, name: 'Hoodie', priceCents: 4500 }, variant: { active: true, size: 'M', color: 'Black', sku: 'H-M-BLK' } },
+  'p1/b': { product: { active: true, name: 'Hoodie', priceCents: 4500 }, variant: { active: true, size: 'L', color: 'Black' } },
+  'p2/a': { product: { active: false, name: 'Hidden', priceCents: 100 }, variant: { active: true, size: 'S', color: 'Red' } },
 };
 const lookup = (p, v) => catalog[`${p}/${v}`] || {};
 
@@ -75,15 +75,15 @@ test('prices come from authoritative data, in integer cents', () => {
   assert.equal(r.lines[1].sku, null);
 });
 
-test('reports inactive products, unknown variants and insufficient stock together', () => {
+test('reports inactive products and unknown variants together; quantity is never limited by stock', () => {
   const r = L.priceOrder([
-    { productId: 'p1', variantId: 'b', quantity: 2 },
+    { productId: 'p1', variantId: 'b', quantity: 10 },
     { productId: 'p2', variantId: 'a', quantity: 1 },
     { productId: 'p1', variantId: 'zzz', quantity: 1 },
   ], lookup);
-  assert.deepEqual(r.problems.map((p) => p.reason), ['insufficient_stock', 'product_unavailable', 'product_unavailable']);
-  assert.equal(r.problems[0].available, 1);
-  assert.equal(r.lines.length, 0);
+  assert.deepEqual(r.problems.map((p) => p.reason), ['product_unavailable', 'product_unavailable']);
+  assert.equal(r.lines.length, 1);
+  assert.equal(r.lines[0].quantity, 10);
 });
 
 test('order status transitions', () => {
@@ -103,16 +103,15 @@ test('variant ids are stable and valid for Firestore document ids', () => {
 const goodProduct = () => ({
   name: 'Team Tee', description: 'Soft', priceCents: 2500, active: true,
   images: [{ url: 'https://firebasestorage.googleapis.com/v0/b/x/o/products%2Fabc%2Fa.jpg?alt=media', path: 'products/abc/a.jpg', alt: 'front' }],
-  variants: [{ size: 'S', color: 'Red', stockQuantity: 3 }, { size: 'M', color: 'Red', stockQuantity: 0 }],
+  variants: [{ size: 'S', color: 'Red' }, { size: 'M', color: 'Red' }],
 });
 
-test('product validation accepts good data and rejects bad prices/duplicates/stock', () => {
+test('product validation accepts good data and rejects bad prices and duplicates', () => {
   const p = L.validateProductInput(goodProduct());
   assert.equal(p.variants.length, 2);
   for (const mutate of [
     (x) => { x.priceCents = 19.99; }, (x) => { x.priceCents = -1; }, (x) => { x.name = ' '; },
-    (x) => { x.variants.push({ size: 's', color: 'RED', stockQuantity: 1 }); },
-    (x) => { x.variants[0].stockQuantity = -2; }, (x) => { x.variants[0].stockQuantity = 1.5; },
+    (x) => { x.variants.push({ size: 's', color: 'RED' }); },
     (x) => { x.images[0].url = 'javascript:alert(1)'; }, (x) => { x.images[0].url = 'https://evil.example.com/a.jpg'; }, (x) => { x.images[0].url = 'http://127.0.0.1:9199/x'; }, (x) => { x.images[0].path = '../evil'; },
   ]) {
     const x = goodProduct(); mutate(x);
