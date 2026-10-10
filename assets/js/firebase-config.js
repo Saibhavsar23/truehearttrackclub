@@ -2,11 +2,11 @@
    Firestore/Storage rules and Cloud Functions). Replace the REPLACE_ME values with the ones from
    Firebase console > Project settings > Your apps > Web app. See README "Firebase setup". */
 export const firebaseConfig = {
-  apiKey: 'REPLACE_ME',
-  authDomain: 'REPLACE_ME.firebaseapp.com',
-  projectId: 'REPLACE_ME',
-  storageBucket: 'REPLACE_ME.firebasestorage.app',
-  appId: 'REPLACE_ME',
+  apiKey: 'AIzaSyB5rsrkQ2ckS9WucdOTgGoQiO7m8GU54Yw',
+  authDomain: 'trueheart-fe921.firebaseapp.com',
+  projectId: 'trueheart-fe921',
+  storageBucket: 'trueheart-fe921.firebasestorage.app',
+  appId: '1:180876246711:web:6463e9cfe384f5bece1732',
 };
 
 /* Optional: reCAPTCHA v3 site key for Firebase App Check (public). Leave empty until App Check is set up. */
