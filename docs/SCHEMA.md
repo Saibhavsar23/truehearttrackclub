@@ -84,8 +84,10 @@ Durable email queue. Written **in the same transaction as the order** (or the st
 `{kind, orderId, orderField, to, subject, text, html, status: pending|sending|sent|failed, attempts, nextAttemptAtMillis, leaseUntilMillis, lastError, sentAt, messageId}`.
 Delivery is claimed with a 2-minute lease in a transaction (no concurrent double send), retried with exponential backoff
 (1, 2, 4 ... capped at 60 minutes), and marked `failed` after 8 attempts (an admin can requeue it). `sent` is written only when the
-SMTP server accepted the recipient. The Message-ID is deterministic per job. Delivery is *at-least-once*: a crash in the
-milliseconds between SMTP acceptance and the `sent` write could repeat one email.
+Make webhook answered 2xx (Make accepted the payload). The payload `id` is deterministic per job. Delivery is *at-least-once*: a crash in the milliseconds between Make accepting and the `sent` write could repeat one email.
+
+## `private/mailWebhook`  (no client access at all, admins included)
+`{ url, token, updatedAt, updatedBy }`: the Make.com webhook. Written only by the `adminSaveMailWebhook` function; the admin UI sees a masked hint.
 
 ## Internal collections (no client access at all)
 * `counters/orders`: `{next}` order number counter.

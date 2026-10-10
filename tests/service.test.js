@@ -342,3 +342,55 @@ test('fulfillment options are admin-configurable and enforced at checkout', asyn
   await assert.rejects(svc.submitOrder(db, orderReq(pid, M_BLACK, 1, { fulfillment: { method: 'ship' } }), ctx({ ip: '3.3.3.3' })), (e) => e.code === 'invalid-argument');
   await assert.rejects(svc.adminSaveSettings(db, 'u', { fulfillmentMethods: [{ id: 'Bad Id!', label: 'x' }] }), (e) => e.code === 'invalid-argument');
 });
+
+/* --------------------------- Make.com email webhook --------------------------- */
+
+test('webhook config: saved privately, returned only masked, validated, clearable', async () => {
+  const hint = await svc.adminSaveMailWebhook(db, 'u', { url: 'https://hook.us1.make.com/abcdefghijSECRET9876', token: 'topsecret' });
+  assert.deepEqual(hint, { configured: true, host: 'hook.us1.make.com', hint: '...9876', tokenSet: true });
+  const got = await svc.adminGetMailConfig(db);
+  assert.equal(got.configured, true);
+  assert.doesNotMatch(JSON.stringify(got), /SECRET|topsecret/);
+  await assert.rejects(svc.adminSaveMailWebhook(db, 'u', { url: 'https://evil.example.com/abcdefghij' }), (e) => e.code === 'invalid-argument');
+  assert.equal((await svc.getMailWebhook(db)).url, 'https://hook.us1.make.com/abcdefghijSECRET9876'); // bad save did not overwrite
+  await svc.adminSaveMailWebhook(db, 'u', { clear: true });
+  assert.equal((await svc.adminGetMailConfig(db)).configured, false);
+});
+
+test('webhook test email goes straight through and reports failures to the admin', async () => {
+  const sent = [];
+  await svc.adminSendTestMail(db, ADMIN_EMAIL, async (job) => { sent.push(job); });
+  assert.equal(sent[0].to, ADMIN_EMAIL); assert.equal(sent[0].kind, 'test');
+  await assert.rejects(svc.adminSendTestMail(db, ADMIN_EMAIL, async () => { throw new Error('Make webhook answered 410'); }), (e) => e.code === 'failed-precondition' && /410/.test(e.message));
+});
+
+test('end to end: an order\'s emails are POSTed to the configured webhook; before configuration they wait and retry', async () => {
+  const http = require('node:http');
+  const W = fnLib('webhook');
+  const received = [];
+  const server = await new Promise((resolve) => { const s = http.createServer((req, res) => { let b = ''; req.on('data', (c) => { b += c; }); req.on('end', () => { received.push({ key: req.headers['x-make-apikey'], body: JSON.parse(b) }); res.end('Accepted'); }); }).listen(0, '127.0.0.1', () => resolve(s)); });
+  const url = `http://127.0.0.1:${server.address().port}/hook`;
+  const send = async (job) => W.sendViaWebhook(job, await svc.getMailWebhook(db));
+
+  await openSchedule();
+  const pid = await makeProduct(5);
+  await svc.submitOrder(db, orderReq(pid, M_BLACK, 1), ctx());
+  const jobs = (await db.collection('mail').get()).docs.map((d) => d.id);
+  const quiet = { warn() {} };
+
+  // not configured yet: the job is kept and retried, the order is unaffected
+  await M.processMail(db, jobs[0], send, { logger: quiet });
+  let m = (await db.doc(`mail/${jobs[0]}`).get()).data();
+  assert.equal(m.status, 'pending'); assert.match(m.lastError, /not configured/);
+  assert.equal((await db.collection('orders').get()).size, 1);
+
+  // configure (the real save validates Make URLs; write the local test URL directly), then the retry delivers
+  await db.collection('private').doc('mailWebhook').set({ url, token: 'abc' });
+  for (const id of jobs) await db.doc(`mail/${id}`).update({ nextAttemptAtMillis: 0 });
+  for (const id of jobs) await M.processMail(db, id, send, { logger: quiet });
+  server.close();
+  assert.equal(received.length, 2);
+  assert.deepEqual(received.map((r) => r.body.kind).sort(), ['admin_new_order', 'customer_confirmation']);
+  assert.ok(received.every((r) => r.key === 'abc' && r.body.html.includes('THTC-00001') === (r.body.kind !== 'x')));
+  for (const id of jobs) assert.equal((await db.doc(`mail/${id}`).get()).data().status, 'sent');
+});

@@ -19,7 +19,7 @@ const ms = (ts) => (ts && ts.toMillis ? ts.toMillis() : null);
 
 function fail(e) {
   const m = String(e && e.message || e);
-  toast(m.replace(/^.*?:\s*/, '') || 'Something went wrong.');
+  toast(m || 'Something went wrong.');
   console.error(e);
 }
 async function guarded(btn, fn) {
@@ -254,7 +254,7 @@ async function openOrder(o) {
       actions.children.length ? h('div', {}, h('h3', { class: 'lbl', style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'Change status'), actions, h('p', { class: 'fine', style: 'margin-top:.5rem' }, 'Changing status never marks anything as paid. Allowed next steps are shown.')) : h('p', { class: 'fine' }, 'This order is in a final state.'),
       h('div', {}, h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'History'), h('ul', {}, (o.statusHistory || []).map((x) => h('li', { class: 'fine' }, `${fmtNY(x.atMillis)}: ${STATUS_LABEL[x.status] || x.status}`)))),
       h('div', {}, h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'Emails'),
-        mails.length ? h('ul', {}, mails.map((m) => h('li', { class: 'fine', style: 'display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;padding:.3rem 0' }, tag(m.status === 'sent' ? 'sent' : m.status === 'failed' ? 'failed' : 'pending', m.status), `${m.kind.replace(/_/g, ' ')} → ${m.to}`, m.attempts ? `(attempts: ${m.attempts})` : '', m.lastError && m.status !== 'sent' ? h('span', { class: 'alert' }, m.lastError) : null,
+        mails.length ? h('ul', {}, mails.map((m) => h('li', { class: 'fine', style: 'display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;padding:.3rem 0' }, tag(m.status === 'sent' ? 'sent' : m.status === 'failed' ? 'failed' : 'pending', m.status === 'sent' ? 'sent to Make' : m.status), `${m.kind.replace(/_/g, ' ')} → ${m.to}`, m.attempts ? `(attempts: ${m.attempts})` : '', m.lastError && m.status !== 'sent' ? h('span', { class: 'alert' }, m.lastError) : null,
           m.status === 'failed' ? h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: (e) => guarded(e.currentTarget, async () => { await callable('adminResendMail', { mailId: m.id }); toast('Email re-queued'); openOrder(o); }) }, 'Retry') : null))) : h('p', { class: 'fine' }, 'No email records.'))),
   );
   dlg.addEventListener('close', () => { history.replaceState(null, '', location.pathname); }, { once: true });
@@ -380,7 +380,7 @@ function editProduct(existing) {
         images: m.images.map((x) => ({ url: x.url, path: x.path, alt: x.alt || '' })),
         variants: m.variants.map((v) => ({ size: String(v.size).trim(), color: String(v.color).trim(), sku: String(v.sku || '').trim(), stockQuantity: v.stock, active: true })),
       });
-    } catch (ex) { err.hidden = false; err.textContent = ex.message.replace(/^.*?:\s*/, ''); err.focus(); return; }
+    } catch (ex) { err.hidden = false; err.textContent = ex.message; err.focus(); return; }
     toast('Product saved');
     dlg.close();
     go('products');
@@ -446,7 +446,7 @@ function editSchedule(s) {
   save.onclick = () => guarded(save, async () => {
     err.hidden = true;
     try { await callable('adminSaveSchedule', { id: s ? s.id : undefined, name: name.value.trim(), opensAtLocal: opens.value, closesAtLocal: closes.value, active: active.checked }); }
-    catch (ex) { err.hidden = false; err.textContent = ex.message.replace(/^.*?:\s*/, ''); err.focus(); return; }
+    catch (ex) { err.hidden = false; err.textContent = ex.message; err.focus(); return; }
     toast('Schedule saved'); dlg.close(); go('schedules');
   });
   clear(dlg).append(
@@ -464,7 +464,7 @@ function editSchedule(s) {
 
 async function viewSettings() {
   const { db, fs } = F;
-  const snap = await fs.getDoc(fs.doc(db, 'settings', 'public'));
+  const [snap, mailCfg] = await Promise.all([fs.getDoc(fs.doc(db, 'settings', 'public')), callable('adminGetMailConfig', {})]);
   const cur = snap.exists() ? snap.data() : { fulfillmentMethods: [], checkoutNotice: '' };
   const methods = (cur.fulfillmentMethods || []).map((x) => ({ ...x }));
   const box = h('div', {});
@@ -487,9 +487,45 @@ async function viewSettings() {
       box, h('button', { class: 'btn btn--ghost btn--sm', type: 'button', style: 'margin-top:.8rem', onclick: () => { methods.push({ id: '', label: '', requiresDetails: false, detailsLabel: '', enabled: true }); draw(); } }, 'Add option'),
       h('div', { class: 'field', style: 'margin-top:1.2rem' }, h('label', { for: 'set-notice' }, 'Extra checkout notice (optional): shown above the Submit button, e.g. pickup or payment instructions once decided'), notice),
       save),
+    mailPanel(mailCfg),
     h('section', { class: 'panel' }, h('h2', {}, 'Administrators'), h('p', { class: 'fine' }, 'Admin access is granted only by the site owner from a terminal, never from this page: ', h('code', { class: 'mono' }, 'node scripts/set-admin.js add person@example.com'), '. See the README, "Adding and removing administrators".')),
   );
   draw();
 }
 
+function mailPanel(cfg) {
+  const status = h('p', { class: cfg.configured ? 'notice' : 'notice notice--warn', role: 'status', style: 'margin-bottom:1rem' });
+  const paint = (c) => {
+    status.className = c.configured ? 'notice' : 'notice notice--warn';
+    status.replaceChildren(...(c.configured
+      ? [h('strong', {}, 'Connected to Make'), ` (${c.host}, ends ${c.hint}). API key: ${c.tokenSet ? 'set' : 'not set'}. For safety the saved URL is never shown again; paste a new one to replace it.`]
+      : [h('strong', {}, 'Email is not set up yet.'), ' Orders are still saved. Emails wait and are retried automatically, and are delivered as soon as you save a webhook below.']));
+  };
+  paint(cfg);
+  const url = h('input', { type: 'text', id: 'mail-url', autocomplete: 'off', spellcheck: 'false', placeholder: 'https://hook.us1.make.com/...' });
+  const key = h('input', { type: 'password', id: 'mail-key', autocomplete: 'new-password', placeholder: cfg.tokenSet ? '(unchanged unless you type a new one)' : 'optional' });
+  const save = h('button', { class: 'btn btn--primary btn--sm', type: 'button' }, 'Save webhook');
+  save.onclick = () => guarded(save, async () => {
+    if (!url.value.trim()) { toast('Paste the Make webhook URL first.'); return; }
+    paint(await callable('adminSaveMailWebhook', { url: url.value.trim(), token: key.value.trim() }));
+    url.value = ''; key.value = ''; toast('Webhook saved. Now send a test email.');
+  });
+  const test = h('button', { class: 'btn btn--ghost btn--sm', type: 'button' }, 'Send test email to admin');
+  test.onclick = () => guarded(test, async () => { const r = await callable('adminSendTestMail', {}); toast(`Test sent to ${r.sentTo}. Check that inbox (and Make's history).`); });
+  const remove = h('button', { class: 'btn btn--ghost btn--sm', type: 'button' }, 'Remove webhook');
+  remove.onclick = () => { if (!confirm('Remove the webhook? Emails will stop going out until you add one again.')) return; guarded(remove, async () => { paint(await callable('adminSaveMailWebhook', { clear: true })); toast('Webhook removed'); }); };
+  return h('section', { class: 'panel', 'aria-labelledby': 'mail-h' }, h('h2', { id: 'mail-h' }, 'Email (Make.com)'),
+    status,
+    h('div', { class: 'field' }, h('label', { for: 'mail-url' }, 'Make webhook URL'), url),
+    h('div', { class: 'field' }, h('label', { for: 'mail-key' }, 'Make API key (optional, recommended)'), key),
+    h('div', { class: 'row-actions' }, save, test, remove),
+    h('details', { style: 'margin-top:1.2rem' }, h('summary', { style: 'cursor:pointer;min-height:44px;display:flex;align-items:center' }, 'How to set up the Make scenario'),
+      h('ol', { class: 'steps', style: 'margin-top:.6rem' },
+        h('li', {}, 'In Make: Create a scenario. First module: Webhooks → Custom webhook → Add. Copy the URL it shows and paste it above.'),
+        h('li', {}, 'In that webhook\'s settings you can turn on API key authentication. If you do, use the same key above. Skip it if unsure.'),
+        h('li', {}, 'Click "Save webhook", then "Send test email". The Make webhook module will say it learned the data structure (to, subject, text, html, kind, replyTo, id).'),
+        h('li', {}, 'Add a second module: Gmail → Send an email (or the Email module). Map To = to, Subject = subject, Content type = HTML, Content = html. Optionally Reply-To = replyTo.'),
+        h('li', {}, 'Turn the scenario ON (scheduling: Immediately). Send another test and confirm it arrives. Every email the store sends (new order, confirmation, status updates) uses this one scenario.')),
+      h('p', { class: 'fine' }, '"Sent" in the order view means Make accepted the email. If the Make scenario itself errors later (for example Gmail disconnects), check Make → History.')));
+}
 boot();

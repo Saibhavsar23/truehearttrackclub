@@ -34,6 +34,7 @@ test.before(async () => {
     await setDoc(doc(db, 'settings/public'), { fulfillmentMethods: [] });
     await setDoc(doc(db, 'counters/orders'), { next: 4 });
     await setDoc(doc(db, 'idempotency/x'), { a: 1 });
+    await setDoc(doc(db, 'private/mailWebhook'), { url: 'https://hook.us1.make.com/secret' });
     await setDoc(doc(db, 'rateLimits/x'), { a: 1 });
   });
 });
@@ -55,7 +56,7 @@ test('public can read active products and active variants only', async () => {
 });
 
 test('public cannot read stock counts, orders, customer info, mail, schedules or internals', async () => {
-  for (const p of ['inventory/live__m__red', 'orders/o1', 'mail/m1', 'storeSchedules/s1', 'counters/orders', 'idempotency/x', 'rateLimits/x']) {
+  for (const p of ['inventory/live__m__red', 'orders/o1', 'mail/m1', 'storeSchedules/s1', 'counters/orders', 'idempotency/x', 'rateLimits/x', 'private/mailWebhook']) {
     await assertFails(getDoc(doc(anon(), p)));
     await assertFails(getDoc(doc(user(), p)));
     await assertFails(getDoc(doc(fakeAdminClaimFalse(), p)));
@@ -82,6 +83,7 @@ test('nobody can write from the client: prices, stock, schedules, statuses, orde
     await assertFails(setDoc(doc(db, 'settings/public'), { fulfillmentMethods: [] }));
     await assertFails(addDoc(collection(db, 'mail'), { to: 'victim@example.com', subject: 'spam' }));
     await assertFails(setDoc(doc(db, 'counters/orders'), { next: 1 }));
+    await assertFails(setDoc(doc(db, 'private/mailWebhook'), { url: 'https://hook.us1.make.com/attacker' }));
     await assertFails(setDoc(doc(db, 'users/u1'), { admin: true })); // no self-service admin flag exists anywhere
   }
 });
@@ -98,6 +100,7 @@ test('admin claim can read operational data', async () => {
   }
   await assertSucceeds(getDocs(collection(admin(), 'orders')));
   await assertFails(getDoc(doc(admin(), 'counters/orders'))); // internals stay server-only even for admins
+  await assertFails(getDoc(doc(admin(), 'private/mailWebhook'))); // the webhook URL is never readable from a browser
 });
 
 test('storage: public can read product photos; only admins can upload small images', async () => {

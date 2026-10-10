@@ -31,7 +31,7 @@ const product = () => ({ name: 'Callable Tee', description: '', priceCents: 2000
 test.before(async () => { await wipeFirestore(); });
 
 test('admin operations reject anonymous callers', async () => {
-  for (const fn of ['adminSaveProduct', 'adminSaveSchedule', 'adminDeleteSchedule', 'adminSaveSettings', 'adminUpdateOrderStatus', 'adminResendMail']) {
+  for (const fn of ['adminSaveProduct', 'adminSaveSchedule', 'adminDeleteSchedule', 'adminSaveSettings', 'adminUpdateOrderStatus', 'adminResendMail', 'adminGetMailConfig', 'adminSaveMailWebhook', 'adminSendTestMail']) {
     const r = await call(fn, {});
     assert.equal(r.body.error && r.body.error.status, 'PERMISSION_DENIED', fn);
   }
@@ -96,4 +96,23 @@ test('submitOrder through the callable succeeds while open, and a hostile payloa
   assert.equal(good.body.result.orderNumber, 'THTC-00001');
   const inv = (await db.collection('inventory').get()).docs[0].data();
   assert.equal(inv.stockQuantity, 1);
+});
+
+test('admin can store the Make webhook; it is validated server-side and never echoed back', async () => {
+  const u = await signUp('mailadmin@example.com');
+  await auth.setCustomUserClaims(u.localId, { admin: true });
+  const token = await signIn('mailadmin@example.com');
+  const bad = await call('adminSaveMailWebhook', { url: 'https://evil.example.com/abcdefghij' }, token);
+  assert.equal(bad.body.error.status, 'INVALID_ARGUMENT');
+  const ok = await call('adminSaveMailWebhook', { url: 'https://hook.us1.make.com/abcdefghijWXYZ', token: 'k' }, token);
+  assert.deepEqual(ok.body.result, { configured: true, host: 'hook.us1.make.com', hint: '...WXYZ', tokenSet: true });
+  const got = await call('adminGetMailConfig', {}, token);
+  assert.equal(got.body.result.hint, '...WXYZ');
+  assert.doesNotMatch(JSON.stringify(got.body), /abcdefghij/);
+  const stored = (await db.doc('private/mailWebhook').get()).data();
+  assert.equal(stored.url, 'https://hook.us1.make.com/abcdefghijWXYZ');
+  // a normal signed-in user cannot read or change it
+  const v = await signUp('nobody@example.com');
+  assert.equal((await call('adminGetMailConfig', {}, v.idToken)).body.error.status, 'PERMISSION_DENIED');
+  assert.equal((await call('adminSaveMailWebhook', { url: 'https://hook.us1.make.com/abcdefghijWXYZ' }, v.idToken)).body.error.status, 'PERMISSION_DENIED');
 });

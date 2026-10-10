@@ -5,23 +5,18 @@ const { getFirestore } = require('firebase-admin/firestore');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { onDocumentCreated } = require('firebase-functions/v2/firestore');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { defineSecret, defineString, defineBoolean } = require('firebase-functions/params');
+const { defineString, defineBoolean } = require('firebase-functions/params');
 const logger = require('firebase-functions/logger');
-const nodemailer = require('nodemailer');
 
 const svc = require('./lib/service');
 const M = require('./lib/mail');
+const W = require('./lib/webhook');
 const { HttpError } = require('./lib/logic');
 
 initializeApp();
 const db = getFirestore();
 
-// ---- configuration (non-secret values are plain params; credentials are Secret Manager secrets) ----
-const SMTP_USER = defineSecret('SMTP_USER');
-const SMTP_PASS = defineSecret('SMTP_PASS');
-const SMTP_HOST = defineString('SMTP_HOST', { default: 'smtp.gmail.com' });
-const SMTP_PORT = defineString('SMTP_PORT', { default: '465' });
-const MAIL_FROM = defineString('MAIL_FROM', { default: 'True Heart Track Club <truehearttrackclub@gmail.com>' });
+// ---- configuration (all non-secret; the Make webhook URL lives in a private Firestore doc set from Admin > Settings) ----
 const ADMIN_EMAIL = defineString('ADMIN_EMAIL', { default: 'truehearttrackclub@gmail.com' });
 const SITE_URL = defineString('SITE_URL', { default: '' });
 const ENFORCE_APP_CHECK = defineBoolean('ENFORCE_APP_CHECK', { default: false });
@@ -86,7 +81,7 @@ exports.adminUpdateOrderStatus = onCall(base, wrap(async (request) => {
   const uid = await requireAdmin(request);
   return svc.adminUpdateOrderStatus(db, uid, request.data && request.data.orderId, request.data && request.data.status);
 }));
-exports.adminResendMail = onCall({ ...base, secrets: [SMTP_USER, SMTP_PASS] }, wrap(async (request) => {
+exports.adminResendMail = onCall(base, wrap(async (request) => {
   await requireAdmin(request);
   const id = request.data && request.data.mailId;
   const out = await svc.adminResendMail(db, id);
@@ -94,40 +89,28 @@ exports.adminResendMail = onCall({ ...base, secrets: [SMTP_USER, SMTP_PASS] }, w
   return out;
 }));
 
-// ------------------------------------- mail -------------------------------------
+// ------------------------------------- mail (Make.com webhook) -------------------------------------
 
-function transporter() {
-  const port = Number(SMTP_PORT.value());
-  return nodemailer.createTransport({
-    host: SMTP_HOST.value(),
-    port,
-    secure: port === 465,
-    auth: { user: SMTP_USER.value(), pass: SMTP_PASS.value() },
-    connectionTimeout: 15000,
-    socketTimeout: 20000,
-  });
-}
+exports.adminGetMailConfig = onCall(base, wrap(async (request) => { await requireAdmin(request); return svc.adminGetMailConfig(db); }));
+exports.adminSaveMailWebhook = onCall(base, wrap(async (request) => svc.adminSaveMailWebhook(db, await requireAdmin(request), request.data)));
+exports.adminSendTestMail = onCall(base, wrap(async (request) => {
+  await requireAdmin(request);
+  return svc.adminSendTestMail(db, ADMIN_EMAIL.value(), send);
+}));
 
+/** Hand one job to the Make webhook (config is read fresh each time so a newly saved URL applies immediately). */
 async function send(job) {
-  const info = await transporter().sendMail({
-    from: MAIL_FROM.value(),
-    to: job.to,
-    subject: job.subject,
-    text: job.text,
-    html: job.html,
-    messageId: `<${job.id}@thtc.store>`, // deterministic per job: a retry never looks like a new message
-    replyTo: ADMIN_EMAIL.value(),
-  });
-  return { accepted: info.accepted || [], rejected: info.rejected || [], messageId: info.messageId };
+  const cfg = await svc.getMailWebhook(db);
+  return W.sendViaWebhook(job, cfg, { replyTo: ADMIN_EMAIL.value() });
 }
 
 /** Deliver immediately when an order (or status update) queues a job. Retries are handled by the sweeper below. */
-exports.deliverMail = onDocumentCreated({ ...base, document: 'mail/{id}', secrets: [SMTP_USER, SMTP_PASS] }, async (event) => {
+exports.deliverMail = onDocumentCreated({ ...base, document: 'mail/{id}' }, async (event) => {
   await M.processMail(db, event.params.id, send, { logger });
 });
 
 /** Every 5 minutes: retry jobs that failed (with backoff) or whose worker died mid-send (expired lease). */
-exports.retryMail = onSchedule({ ...base, schedule: 'every 5 minutes', timeZone: 'America/New_York', secrets: [SMTP_USER, SMTP_PASS] }, async () => {
+exports.retryMail = onSchedule({ ...base, schedule: 'every 5 minutes', timeZone: 'America/New_York' }, async () => {
   const now = Date.now();
   const snap = await db.collection('mail').where('status', 'in', ['pending', 'sending']).limit(50).get();
   for (const d of snap.docs) {

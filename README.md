@@ -5,7 +5,7 @@ a storefront at `/shop/`, an admin dashboard at `/admin/`, and a Firebase backen
 **There is no payment processing.** Customers submit an order; payment and fulfillment are arranged separately.
 
 > **Status: built and tested locally against the Firebase Emulator Suite. Not yet connected to a real Firebase project,
-> a real SMTP account, or deployed.** See [Status](#status) for exactly what is and isn't verified.
+> a real Make.com email scenario, or deployed.** See [Status](#status) for exactly what is and isn't verified.
 > Do not treat it as production-ready until the checklist at the bottom is done.
 
 ## Status
@@ -19,9 +19,9 @@ a storefront at `/shop/`, an admin dashboard at `/admin/`, and a Firebase backen
 | Store schedules (New York time, DST, overlap rules, server-side enforcement) | Implemented and tested (spring-forward gap, fall-back overlap, 23 h / 25 h days, open/close boundaries) |
 | Admin dashboard (overview, orders, products + photo upload, schedules, settings) | Implemented. Exercised in a browser against the emulators |
 | Admin authorization (custom claim, re-checked server-side on every call; rules deny all client writes) | Implemented and tested (6 callable tests, 7 rules tests incl. Storage) |
-| Email (queue, retry/backoff, lease, dedupe, templates) | Implemented and tested with a fake SMTP transport. **Real SMTP delivery has NOT been tested** (needs your credentials) |
+| Email (queue, retry/backoff, lease, dedupe, templates; delivered by a **Make.com webhook** you paste into Admin → Settings) | Implemented and tested against a local fake webhook. **A real Make scenario and real email delivery have NOT been tested** |
 | Accessibility | axe-core (WCAG 2 A/AA) found 0 violations on the shop, cart, checkout (with errors), and every admin screen. **Not tested** with a real screen reader, or on real iOS/Android devices |
-| Firebase project, deploy, App Check, SMTP secrets, first admin | **Awaiting your configuration** (steps below) |
+| Firebase deploy, Make scenario + webhook, first admin | **Awaiting your configuration** (steps below) |
 | Vercel deploy of these changes | **Not done / not verified.** Changes are on branch `merch-store`, not pushed |
 
 Test counts: 24 unit + 30 emulator (rules, orders, mail) + 6 callable-auth = **60 passing**.
@@ -62,7 +62,7 @@ Nothing about hosting changes: same repo, same project, `index.html` still at th
 DNS/domain changes. New pages are folders with an `index.html`, so `/shop/` and `/admin/` work as static routes.
 `.vercelignore` keeps backend/test files out of CLI deployments (Git-integration deployments serve the checkout as-is; the backend
 files contain no secrets and are not linked from any page). **No Vercel environment variables are needed**: the Firebase web config
-is public and lives in `assets/js/firebase-config.js`. Never put the service account or SMTP password in Vercel.
+is public and lives in `assets/js/firebase-config.js`. Never put the service account or the Make webhook URL in Vercel or in git.
 
 ## Firebase setup (one time)
 
@@ -73,7 +73,7 @@ is public and lives in `assets/js/firebase-config.js`. Never put the service acc
      Settings → User actions, **disable "Enable create (sign-up)"** if offered (Identity Platform); even if sign-up stays on,
      a new account has no `admin` claim and can do nothing.
    * Cloud Firestore (production mode, a US region), Cloud Storage (a US region), Cloud Functions (2nd gen), Cloud Run,
-     Cloud Build, Artifact Registry, Eventarc, Cloud Scheduler, Pub/Sub, Secret Manager, Identity Toolkit API.
+     Cloud Build, Artifact Registry, Eventarc, Cloud Scheduler, Pub/Sub, Identity Toolkit API.
    * Optional but recommended: Firebase App Check (reCAPTCHA v3).
 3. **Register a Web app** (Project settings → Your apps → `</>`). Copy the config into `assets/js/firebase-config.js`
    (replace every `REPLACE_ME`). These values are public identifiers, not secrets.
@@ -91,30 +91,42 @@ is public and lives in `assets/js/firebase-config.js`. Never put the service acc
 7. If `functions` region should differ from `us-east1`, change `REGION` in `functions/index.js` **and** `functionsRegion` in
    `assets/js/firebase-config.js`.
 
-### Function configuration and the SMTP secret
+### Function configuration
 Non-secret settings are function *parameters* (the CLI prompts for them on first deploy, or put them in
 `functions/.env.<your-project-id>`, which is gitignored):
 
 | param | meaning | default |
 |---|---|---|
 | `SITE_URL` | **set to your production URL**, e.g. `https://truehearttrackclub.com` (used for the admin link in emails) | empty |
-| `ADMIN_EMAIL` | where new-order notifications go | `truehearttrackclub@gmail.com` |
-| `MAIL_FROM` | From header | `True Heart Track Club <truehearttrackclub@gmail.com>` |
-| `SMTP_HOST` / `SMTP_PORT` | | `smtp.gmail.com` / `465` |
-| `ENFORCE_APP_CHECK` | reject calls without a valid App Check token | `false` |
+| `ADMIN_EMAIL` | where new-order notifications go, and the Reply-To on customer emails | `truehearttrackclub@gmail.com` |
+| `ENFORCE_APP_CHECK` | reject calls without a valid App Check token (leave `false` unless you set up App Check) | `false` |
 
-SMTP credentials are **Secret Manager secrets** (never in git, Vercel, or the browser):
-```bash
-firebase functions:secrets:set SMTP_USER     # e.g. truehearttrackclub@gmail.com
-firebase functions:secrets:set SMTP_PASS     # see Gmail note
-firebase deploy --only functions
-```
-**Gmail:** a normal Google password will not work. The account needs **2-Step Verification** on, then create an
-**App Password** (Google Account → Security → App passwords) and use that 16-character value as `SMTP_PASS`. Gmail limits
-roughly 500 recipients/day for personal accounts, which is plenty here, but a dedicated transactional provider (Resend,
-Postmark, SendGrid via SMTP) is more reliable if you outgrow it; just change `SMTP_HOST/PORT` and the two secrets. Gmail rewrites
-the From address to the authenticated account, which is why `MAIL_FROM` defaults to that address.
+There are **no email passwords or secrets to deploy**. Email is sent by Make.com (next section).
 
+### Email via Make.com
+The store never talks to an email server. For each email it POSTs one JSON document to a Make **custom webhook**, and a Make scenario
+sends the real email from your own Gmail/Outlook/etc. connection.
+
+1. In Make: **Create a scenario** → first module **Webhooks → Custom webhook → Add** → copy the URL (looks like
+   `https://hook.us1.make.com/...`).
+2. In the store admin: **Settings → Email (Make.com)** → paste the URL → **Save webhook**. (Optional: enable API-key
+   authentication on the Make webhook and paste the same key; the function sends it in the `x-make-apikey` header. Verify the header
+   name in Make's webhook settings.)
+3. Click **Send test email to admin**. Make's webhook module will "learn" the data structure: `to, subject, text, html, kind, replyTo, fromName, id, orderId`.
+4. Add a second module, e.g. **Gmail → Send an email**: To = `to`, Subject = `subject`, Content type = HTML, Content = `html`
+   (optional Reply-To = `replyTo`). Turn the scenario **ON** (scheduling: Immediately). Send another test.
+5. That one scenario handles every email: new-order notification, customer confirmation, and status updates (`kind` tells them apart).
+
+Behaviour to know:
+* The webhook URL is stored in `private/mailWebhook` in Firestore, which **no browser can read (admins included)**; the admin page shows
+  only a masked hint. Only URLs shaped like `https://hook.<region>.make.com/<id>` are accepted. Treat the URL as a password: anyone who has it
+  can make your scenario send email.
+* Orders never depend on email. If the webhook is missing or Make is down, orders are still saved and the emails **wait and retry
+  automatically** (backoff up to an hour, 8 attempts) and are delivered once the webhook works; failed ones can be retried from the order view.
+* "Sent" in the order view means **Make accepted the payload**. If the scenario fails afterwards (e.g. Gmail disconnects), check
+  Make → History. Each payload has a stable `id` (and `x-thtc-idempotency` header); use it with a Make data store if you ever need hard de-duplication.
+* Make plan limits apply: every email costs a few Make operations (webhook + send module); a typical order sends two emails. Check your
+  current Make plan's monthly operation allowance.
 ### Adding and removing administrators
 Admin = a Firebase Auth user with the custom claim `admin: true`. There is no admin sign-up page, no hardcoded password, and no
 Firestore field that grants access. Every privileged function re-reads the user record on the server, so revocation is immediate
@@ -161,7 +173,7 @@ visible in the admin order view.
 npm --prefix functions test     # 24 unit tests: NY time/DST, validation, pricing, transitions
 npm --prefix tests test         # 36 emulator tests: rules (Firestore+Storage), orders, concurrency, mail queue, callable auth
 ```
-Requires Java (for the Firestore emulator) and `firebase-tools`. The tests use fake SMTP and never send email or create real orders.
+Requires Java (for the Firestore emulator) and `firebase-tools`. The tests use a local fake webhook and never send email or create real orders.
 
 ## How the important behaviours work
 * **Order submission** (`submitOrder`): validates input → rate-limits (IP, email) → in **one Firestore transaction**: idempotency check,
@@ -182,7 +194,7 @@ Requires Java (for the Firestore emulator) and `firebase-tools`. The tests use f
 * Customers cannot look up past orders (no accounts); they get a confirmation page and email.
 * Rate limiting is per IP/email in Firestore; add App Check for stronger bot resistance.
 * Admin Firestore *reads* rely on the token claim (≤ 1 hour after revocation); all writes re-verify live.
-* Email is at-least-once (see `docs/SCHEMA.md`). Gmail SMTP is acceptable at this scale, not ideal.
+* Email is at-least-once (see `docs/SCHEMA.md`) and depends on Make being up; failed sends are retried and visible in the admin order view.
 * Variant removal retires a variant instead of deleting it; products are deactivated, not deleted.
 * Product photos are resized in the browser to 1600 px WebP before upload (5 MB hard limit in Storage rules).
 * Times: all admin/customer-facing times are New York time. Fall-back ambiguity resolves to the first occurrence.
@@ -190,7 +202,7 @@ Requires Java (for the Firestore emulator) and `firebase-tools`. The tests use f
 ## Go-live checklist (nothing below is done yet)
 - [ ] Firebase project + Blaze plan + budget alert; `.firebaserc` and `assets/js/firebase-config.js` filled in
 - [ ] `firebase deploy` rules/indexes/storage/functions succeed; indexes show **Enabled**; TTL policies exist
-- [ ] `SITE_URL` param set; `SMTP_USER`/`SMTP_PASS` secrets set (Gmail App Password)
+- [ ] `SITE_URL` param set; Make scenario built and **ON**; webhook saved in Admin → Settings → Email; test email received
 - [ ] First admin created with `scripts/set-admin.js`; sign-in works at `/admin/`
 - [ ] Authorized domains include the production domain
 - [ ] **Send one real test order with your own email** (this will send real emails; do it deliberately), then cancel it; confirm both

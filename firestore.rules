@@ -36,6 +36,8 @@ service cloud.firestore {
     match /storeSchedules/{id} { allow read: if isAdmin(); allow write: if false; }
 
     // Internal bookkeeping: nobody from the client.
+    // Secrets (the Make email webhook URL). Not readable by anyone in a browser, admins included; only Cloud Functions touch it.
+    match /private/{id}     { allow read, write: if false; }
     match /counters/{id}    { allow read, write: if false; }
     match /idempotency/{id} { allow read, write: if false; }
     match /rateLimits/{id}  { allow read, write: if false; }

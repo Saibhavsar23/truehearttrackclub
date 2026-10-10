@@ -8,6 +8,7 @@ const { FieldValue } = require('firebase-admin/firestore');
 const L = require('./logic');
 const T = require('./time');
 const M = require('./mail');
+const W = require('./webhook');
 
 const { HttpError } = L;
 const RATE = { windowMs: 10 * 60 * 1000, perIp: 10, perEmail: 5 };
@@ -164,6 +165,41 @@ async function adminSaveProduct(db, uid, raw) {
   });
 }
 
+/* ------------------------------ email webhook (Make.com) ------------------------------ */
+// Stored in a collection that NO client can read (see firestore.rules). The admin UI can set it and sees only a masked hint.
+
+async function getMailWebhook(db) {
+  const s = await db.collection('private').doc('mailWebhook').get();
+  return s.exists ? s.data() : null;
+}
+
+async function adminGetMailConfig(db) {
+  const cfg = await getMailWebhook(db);
+  return { ...W.describeWebhook(cfg), updatedAtMillis: cfg && cfg.updatedAt ? cfg.updatedAt.toMillis() : null };
+}
+
+async function adminSaveMailWebhook(db, uid, data) {
+  if (data && data.clear === true) {
+    await db.collection('private').doc('mailWebhook').delete();
+    return { configured: false };
+  }
+  const v = W.validateWebhookConfig(data && data.url, data && data.token);
+  if (!v.ok) throw new HttpError('invalid-argument', v.error);
+  await db.collection('private').doc('mailWebhook').set({ url: v.url, token: v.token || null, updatedAt: FieldValue.serverTimestamp(), updatedBy: uid });
+  return W.describeWebhook({ url: v.url, token: v.token });
+}
+
+/** Sends one test email straight through the webhook (not queued) so the admin gets an immediate answer. */
+async function adminSendTestMail(db, adminEmail, send) {
+  const job = {
+    id: `test_${Date.now()}`, kind: 'test', to: adminEmail, orderId: null,
+    subject: 'True Heart store: test email',
+    text: 'This is a test from the True Heart store admin. If you can read this, the Make scenario is sending email correctly.',
+    html: '<p>This is a test from the <strong>True Heart store admin</strong>. If you can read this, the Make scenario is sending email correctly.</p>',
+  };
+  try { await send(job); } catch (e) { throw new HttpError('failed-precondition', e.message); }
+  return { sentTo: adminEmail };
+}
 /* ---------------------------------- orders --------------------------------- */
 
 async function hit(db, key, limit, now) {
@@ -345,4 +381,5 @@ async function adminResendMail(db, mailId, now = () => Date.now()) {
 module.exports = {
   RATE, getStoreStatus, adminSaveSchedule, adminDeleteSchedule, getPublicSettings, adminSaveSettings,
   adminSaveProduct, submitOrder, adminUpdateOrderStatus, adminResendMail, scheduleFromDoc,
+  getMailWebhook, adminGetMailConfig, adminSaveMailWebhook, adminSendTestMail,
 };
