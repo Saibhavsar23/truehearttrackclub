@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Shop | True Heart Track Club</title>
+<meta name="description" content="Official True Heart Track Club merch. Limited drops, no online payment: submit an order and we'll arrange payment and pickup with you.">
+<meta name="theme-color" content="#0a0a0b">
+<meta name="color-scheme" content="dark">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="True Heart Track Club">
+<meta property="og:title" content="Shop | True Heart Track Club">
+<meta property="og:description" content="Limited True Heart Track Club merch drops.">
+<link rel="icon" type="image/png" href="/assets/favicon.png">
+<link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/css/store.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap bar">
+    <a class="brand" href="/" aria-label="True Heart Track Club home">
+      <span class="logo" role="img" aria-label="True Heart Track Club logo"></span>
+      <span class="brand__txt">True Heart<span class="brand__sub"> Track Club</span></span>
+    </a>
+    <nav class="nav" aria-label="Primary">
+      <ul>
+        <li><a href="/#about">About</a></li>
+        <li><a href="/#what-we-do">What We Do</a></li>
+        <li><a href="/#follow">Follow</a></li>
+        <li><a href="/shop/" aria-current="page">Shop</a></li>
+      </ul>
+    </nav>
+    <div class="bar__right">
+      <nav class="minilinks" aria-label="Site"><a href="/">Home</a></nav>
+      <button class="cartbtn" id="cart-open" type="button" aria-haspopup="dialog" aria-label="Open cart, 0 items">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8h12l1 12H5L6 8zM9 8V6a3 3 0 0 1 6 0v2"/></svg>
+        <span class="cartbtn__count" id="cart-count" hidden aria-hidden="true">0</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<main id="main" tabindex="-1">
+  <section class="shop-hero" aria-labelledby="shop-h">
+    <div class="wrap">
+      <p class="kicker">Official merch</p>
+      <h1 class="h2" id="shop-h">The Shop</h1>
+      <p class="lede">Limited drops from the runners behind True Heart. No online payment: you submit an order, and we arrange payment and pickup with you directly.</p>
+      <p id="status-chip" class="status-chip" hidden></p>
+    </div>
+  </section>
+
+  <div class="wrap">
+    <div id="confirmation" hidden></div>
+    <div id="stage" aria-live="polite" aria-busy="true">
+      <noscript><div class="state"><h2 class="h2">JavaScript needed</h2><p class="lede">The shop needs JavaScript to run. Questions? Email truehearttrackclub@gmail.com.</p></div></noscript>
+    </div>
+  </div>
+</main>
+
+<!-- Product details -->
+<dialog id="pdp" class="sheet" aria-labelledby="pdp-title"></dialog>
+
+<!-- Cart -->
+<dialog id="cart" class="drawer" aria-labelledby="cart-title">
+  <div class="dlg-head">
+    <h2 id="cart-title">Your cart</h2>
+    <button class="iconbtn" type="button" data-close aria-label="Close cart"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19"/></svg></button>
+  </div>
+  <div class="cart-body" id="cart-body"></div>
+  <div class="cart-foot" id="cart-foot"></div>
+</dialog>
+
+<!-- Checkout -->
+<dialog id="checkout" class="sheet" aria-labelledby="co-title"></dialog>
+
+<footer class="footer">
+  <div class="wrap footer__grid">
+    <a class="brand" href="/" aria-label="True Heart Track Club home">
+      <span class="logo" role="img" aria-label="True Heart Track Club logo" style="width:52px;border-radius:3px"></span>
+      <span class="brand__txt">True Heart<span class="brand__sub"> Track Club</span></span>
+    </a>
+    <nav aria-label="Footer">
+      <ul>
+        <li><a href="/#about">About</a></li>
+        <li><a href="/#follow">Follow</a></li>
+        <li><a href="https://www.instagram.com/truehearttrackclub/" target="_blank" rel="noopener">Instagram</a></li>
+        <li><a href="mailto:truehearttrackclub@gmail.com">Email</a></li>
+      </ul>
+    </nav>
+    <small>&copy; <span id="yr">2026</span> True Heart Track Club. A runner-created media brand based around New Jersey high-school running. Not an official school organization. Orders are requests: no payment is taken on this website. All times on this page are Eastern Time.</small>
+  </div>
+</footer>
+
+<script type="module" src="/assets/js/shop.js"></script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+rules_version = '2';
+
+service firebase.storage {
+  function isAdmin() {
+    return request.auth != null && 'admin' in request.auth.token && request.auth.token.admin == true;
+  }
+  match /b/{bucket}/o {
+    // Product photos: public to view; only administrators may upload, and only images under 5 MB.
+    match /products/{productId}/{fileName} {
+      allow read: if true;
+      allow write: if isAdmin()
+                   && request.resource.size < 5 * 1024 * 1024
+                   && request.resource.contentType.matches('image/(jpeg|png|webp|avif)');
+      allow delete: if isAdmin();
+    }
+    match /{allPaths=**} { allow read, write: if false; }
+  }
+}

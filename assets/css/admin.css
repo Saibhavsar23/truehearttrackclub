@@ -1,0 +1,48 @@
+/* Admin dashboard additions (loaded after store.css). */
+body.admin{ background:#0d0d0f; }
+.adm-wrap{ width:min(1180px,100% - 2rem); margin-inline:auto; padding:1.5rem 0 4rem; }
+.adm-top{ display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; margin-bottom:1rem; }
+.adm-top h1{ font:400 clamp(1.8rem,5vw,2.6rem)/1 var(--display); letter-spacing:.04em; text-transform:uppercase; }
+.adm-who{ color:var(--muted); font-size:.88rem; display:flex; gap:.8rem; align-items:center; flex-wrap:wrap; }
+.tabs{ display:flex; gap:.25rem; overflow-x:auto; border-bottom:1px solid var(--line); margin-bottom:1.5rem; }
+.tabs button{ background:none; border:0; border-bottom:3px solid transparent; padding:.9rem 1rem; min-height:48px; cursor:pointer; color:var(--muted); font:600 .8rem/1 var(--body); letter-spacing:.14em; text-transform:uppercase; white-space:nowrap; }
+.tabs button[aria-selected="true"]{ color:#fff; border-bottom-color:var(--red); }
+.cards{ display:grid; gap:1rem; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); margin-bottom:1.5rem; }
+.card2{ background:var(--panel); border:1px solid var(--line); padding:1.1rem 1.2rem; }
+.card2 h3{ font:600 .72rem/1 var(--body); letter-spacing:.18em; text-transform:uppercase; color:var(--faint); margin-bottom:.7rem; }
+.big{ font:400 2.2rem/1 var(--display); letter-spacing:.03em; }
+.panel{ background:var(--panel); border:1px solid var(--line); padding:1.2rem; margin-bottom:1.5rem; }
+.panel h2{ font:400 1.4rem/1 var(--display); letter-spacing:.05em; text-transform:uppercase; margin-bottom:1rem; }
+.toolbar{ display:flex; gap:.7rem; flex-wrap:wrap; align-items:end; margin-bottom:1rem; }
+.toolbar .field{ margin:0; }
+.toolbar select,.field select{ min-height:50px; padding:0 .8rem; background:var(--black); border:1px solid var(--line-strong); border-radius:2px; color:#fff; }
+.tablewrap{ overflow-x:auto; }
+table.t{ width:100%; border-collapse:collapse; font-size:.92rem; }
+table.t th{ text-align:left; padding:.6rem .7rem; font:600 .7rem/1 var(--body); letter-spacing:.14em; text-transform:uppercase; color:var(--faint); border-bottom:1px solid var(--line); white-space:nowrap; }
+table.t td{ padding:.7rem; border-bottom:1px solid var(--line); vertical-align:middle; }
+table.t tr.click{ cursor:pointer; }
+@media (hover:hover){ table.t tr.click:hover td{ background:var(--panel-2); } }
+table.t td .linkbtn{ min-height:auto; }
+.tag{ display:inline-block; padding:.25rem .55rem; border:1px solid var(--line-strong); font:700 .66rem/1 var(--body); letter-spacing:.12em; text-transform:uppercase; white-space:nowrap; }
+.tag--submitted{ border-color:var(--warn); color:var(--warn); }
+.tag--confirmed,.tag--preparing,.tag--ready{ border-color:#6aa6ff; color:#8fbfff; }
+.tag--fulfilled,.tag--open,.tag--sent{ border-color:var(--ok); color:var(--ok); }
+.tag--cancelled,.tag--failed,.tag--ended,.tag--inactive{ border-color:var(--faint); color:var(--faint); }
+.tag--retrying,.tag--pending,.tag--upcoming{ border-color:var(--warn); color:var(--warn); }
+.kv{ display:grid; grid-template-columns:max-content 1fr; gap:.4rem 1.2rem; font-size:.94rem; }
+.kv dt{ color:var(--faint); }
+.row-actions{ display:flex; gap:.5rem; flex-wrap:wrap; }
+.formgrid{ display:grid; gap:0 1.2rem; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }
+.checks{ display:flex; gap:1.4rem; flex-wrap:wrap; margin:.4rem 0 1rem; }
+.checks label{ display:flex; gap:.5rem; align-items:center; min-height:44px; cursor:pointer; }
+.checks input{ width:20px; height:20px; accent-color:var(--red); }
+.imgrow{ display:flex; gap:.9rem; align-items:center; padding:.6rem 0; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+.imgrow img{ width:64px; height:80px; object-fit:cover; background:var(--panel-2); }
+.imgrow .field{ flex:1 1 220px; margin:0; }
+.vtable input[type=text],.vtable input[type=number]{ min-height:44px; width:100%; min-width:70px; padding:.4rem .6rem; background:var(--black); border:1px solid var(--line-strong); color:#fff; }
+.vtable td{ padding:.4rem; }
+.vtable input[type=checkbox]{ width:20px; height:20px; accent-color:var(--red); }
+.login{ max-width:420px; margin:12vh auto 0; padding:2rem; background:var(--panel); border:1px solid var(--line); }
+.login h1{ font:400 2rem/1 var(--display); letter-spacing:.05em; text-transform:uppercase; margin-bottom:.4rem; }
+.mono{ font-family:ui-monospace,Menlo,Consolas,monospace; font-size:.85rem; }
+.empty{ color:var(--muted); padding:1rem 0; }

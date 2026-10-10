@@ -1,0 +1,12 @@
+functions/
+tests/
+scripts/
+docs/
+firebase.json
+.firebaserc
+firestore.rules
+firestore.indexes.json
+storage.rules
+package.json
+package-lock.json
+README.md
