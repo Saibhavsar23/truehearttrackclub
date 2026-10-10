@@ -242,6 +242,27 @@ test('cancelling is final and emails the customer; a cancelled order cannot chan
   assert.equal((await db.collection('mail').where('kind', '==', 'customer_status').get()).size, 1);
 });
 
+test('payment is recorded by an admin only: needs a method, is reversible, and a cancelled order cannot be marked paid', async () => {
+  const { orderId } = await placeOrder();
+  let o = (await db.doc(`orders/${orderId}`).get()).data();
+  assert.equal(o.paid, false);
+  assert.equal(o.paymentStatus, 'not_collected_online');
+  await assert.rejects(svc.adminSetOrderPayment(db, 'u', orderId, { paid: true }), (e) => e.code === 'invalid-argument');
+  await assert.rejects(svc.adminSetOrderPayment(db, 'u', orderId, { paid: true, method: 'bitcoin' }), (e) => e.code === 'invalid-argument');
+  await assert.rejects(svc.adminSetOrderPayment(db, 'u', orderId, { paid: 'yes', method: 'cash' }), (e) => e.code === 'invalid-argument');
+  const r = await svc.adminSetOrderPayment(db, 'u', orderId, { paid: true, method: 'venmo' }, () => 1700000000000);
+  assert.deepEqual(r, { paid: true, paymentMethod: 'venmo', paidAtMillis: 1700000000000 });
+  o = (await db.doc(`orders/${orderId}`).get()).data();
+  assert.equal(o.paid, true); assert.equal(o.paymentMethod, 'venmo'); assert.equal(o.status, 'submitted');
+  await svc.adminSetOrderPayment(db, 'u', orderId, { paid: false, method: null });
+  o = (await db.doc(`orders/${orderId}`).get()).data();
+  assert.equal(o.paid, false); assert.equal(o.paymentMethod, null); assert.equal(o.paidAtMillis, null);
+  assert.equal(o.paymentHistory.length, 2);
+  await svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled');
+  await assert.rejects(svc.adminSetOrderPayment(db, 'u', orderId, { paid: true, method: 'cash' }), (e) => e.code === 'failed-precondition');
+  await assert.rejects(svc.adminSetOrderPayment(db, 'u', 'doesnotexist1', { paid: false }), (e) => e.code === 'not-found');
+});
+
 test('an order can be deleted completely, together with its email records; nothing else is touched', async () => {
   const { orderId, pid } = await placeOrder();
   await svc.submitOrder(db, orderReq(pid, M_BLACK, 1), ctx({ ip: '4.4.4.4' }));       // a second order that must survive

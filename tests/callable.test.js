@@ -31,7 +31,7 @@ const product = () => ({ name: 'Callable Tee', description: '', priceCents: 2000
 test.before(async () => { await wipeFirestore(); });
 
 test('admin operations reject anonymous callers', async () => {
-  for (const fn of ['adminSaveProduct', 'adminSaveSchedule', 'adminDeleteSchedule', 'adminSaveSettings', 'adminUpdateOrderStatus', 'adminDeleteOrder', 'adminResendMail', 'adminGetMailConfig', 'adminSaveMailWebhook', 'adminSendTestMail']) {
+  for (const fn of ['adminSaveProduct', 'adminSaveSchedule', 'adminDeleteSchedule', 'adminSaveSettings', 'adminUpdateOrderStatus', 'adminSetOrderPayment', 'adminDeleteOrder', 'adminResendMail', 'adminGetMailConfig', 'adminSaveMailWebhook', 'adminSendTestMail']) {
     const r = await call(fn, {});
     assert.equal(r.body.error && r.body.error.status, 'PERMISSION_DENIED', fn);
   }

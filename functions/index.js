@@ -81,6 +81,11 @@ exports.adminUpdateOrderStatus = onCall(base, wrap(async (request) => {
   const uid = await requireAdmin(request);
   return svc.adminUpdateOrderStatus(db, uid, request.data && request.data.orderId, request.data && request.data.status);
 }));
+exports.adminSetOrderPayment = onCall(base, wrap(async (request) => {
+  const uid = await requireAdmin(request);
+  const d = request.data || {};
+  return svc.adminSetOrderPayment(db, uid, d.orderId, d);
+}));
 exports.adminDeleteOrder = onCall(base, wrap(async (request) => {
   await requireAdmin(request);
   return svc.adminDeleteOrder(db, request.data && request.data.orderId);

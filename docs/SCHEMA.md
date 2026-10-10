@@ -58,7 +58,8 @@ Empty by default. When empty, orders record `fulfillmentMethod: "arranged_separa
 | `items[]` | **immutable snapshot**: `productId, variantId, productName, size, color, sku, quantity, unitPriceCents, lineTotalCents` |
 | `subtotalCents`, `currency` | |
 | `status` | `submitted → confirmed → preparing → ready → fulfilled`, or `cancelled` |
-| `paymentStatus` | always `"not_collected_online"`. The system never marks an order paid |
+| `paymentStatus` | always `"not_collected_online"`: the website never collects money |
+| `paid`, `paymentMethod`, `paidAtMillis`, `paidByUid`, `paymentHistory[]` | recorded **by hand** by an admin (`adminSetOrderPayment`). `paymentMethod` is `cash`, `venmo` or `zelle`; a cancelled order cannot be marked paid |
 | `statusHistory[]` | `{status, byUid, atMillis}` |
 | `notificationStatus` | `{admin, customer}`: `pending / retrying / sent / failed` |
 | `createdAt`, `updatedAt` | |

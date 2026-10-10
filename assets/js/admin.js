@@ -7,6 +7,7 @@ import { money, fmtNY, toNyLocalInput, h, $, clear, toast, icon } from './common
 const app = $('#app');
 const STATUS_NEXT = { submitted: ['confirmed', 'cancelled'], confirmed: ['preparing', 'ready', 'fulfilled', 'cancelled'], preparing: ['ready', 'fulfilled', 'cancelled'], ready: ['fulfilled', 'cancelled'], fulfilled: [], cancelled: [] };
 const STATUS_LABEL = { submitted: 'Submitted', confirmed: 'Confirmed', preparing: 'Preparing', ready: 'Ready', fulfilled: 'Fulfilled', cancelled: 'Cancelled' };
+const PAY_LABEL = { cash: 'Cash', venmo: 'Venmo', zelle: 'Zelle' };
 const ACTION_LABEL = { confirmed: 'Confirm order', preparing: 'Mark preparing', ready: 'Mark ready', fulfilled: 'Mark fulfilled', cancelled: 'Cancel order' };
 
 let F;                      // firebase handles
@@ -127,69 +128,136 @@ async function loadProducts(force) {
 
 async function viewOverview() {
   const { db, fs } = F; const out = panel;
-  const [status, products, recent, awaiting, scheds, all] = await Promise.all([
+  const [status, products, recent, scheds, all, failedSnap] = await Promise.all([
     callable('getStoreStatus', {}), loadProducts(true),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(8))),
-    fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.where('status', '==', 'submitted'), fs.orderBy('createdAt', 'desc'), fs.limit(25))),
     fs.getDocs(fs.collection(db, 'storeSchedules')),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(1000))),
+    fs.getDocs(fs.query(fs.collection(db, 'mail'), fs.where('status', '==', 'failed'), fs.limit(20))),
   ]);
-  // What has to be ordered from the supplier: every non-cancelled order, summed per product / size / color.
-  const totals = new Map(); let units = 0; let liveOrders = 0;
-  for (const d of all.docs) {
-    const o = d.data(); if (o.status === 'cancelled') continue;
-    liveOrders++;
+
+  // ---- numbers (every order that is not cancelled counts as a sale; "paid" is what you recorded by hand) ----
+  const orders = all.docs.map(snapOrder);
+  const live = orders.filter((o) => o.status !== 'cancelled');
+  const sum = (arr, f) => arr.reduce((n, x) => n + f(x), 0);
+  const unitsOf = (o) => sum(o.items || [], (i) => i.quantity);
+  const units = sum(live, unitsOf);
+  const revenue = sum(live, (o) => o.subtotalCents);
+  const paidOrders = live.filter((o) => o.paid === true);
+  const unpaidOrders = live.filter((o) => o.paid !== true);
+  const collected = sum(paidOrders, (o) => o.subtotalCents);
+  const awaitingAction = live.filter((o) => o.status === 'submitted').length;
+  const failedMail = failedSnap.size;
+  const customers = new Set(live.map((o) => String(o.customerEmail || '').toLowerCase())).size;
+  const times = live.map((o) => o.createdAtMillis).filter(Boolean);
+  const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '0%');
+
+  const byStatus = Object.keys(STATUS_LABEL).map((s) => {
+    const list = orders.filter((o) => o.status === s);
+    return [tag(s, STATUS_LABEL[s]), String(list.length), s === 'cancelled' ? '-' : String(list.filter((o) => o.paid === true).length), s === 'cancelled' ? '-' : String(list.filter((o) => o.paid !== true).length), money(sum(list, (o) => o.subtotalCents))];
+  });
+  const byMethod = Object.keys(PAY_LABEL).map((m) => {
+    const list = paidOrders.filter((o) => o.paymentMethod === m);
+    return [PAY_LABEL[m], String(list.length), money(sum(list, (o) => o.subtotalCents))];
+  });
+  const noMethod = paidOrders.filter((o) => !PAY_LABEL[o.paymentMethod]);
+  if (noMethod.length) byMethod.push(['Paid (method not recorded)', String(noMethod.length), money(sum(noMethod, (o) => o.subtotalCents))]);
+
+  const prod = new Map();
+  for (const o of live) {
+    const seen = new Set();
     for (const i of o.items || []) {
-      const k = `${i.productName}|${i.size}|${i.color}`;
-      const t = totals.get(k) || { name: i.productName, size: i.size, color: i.color, qty: 0 };
-      t.qty += i.quantity; units += i.quantity; totals.set(k, t);
+      const p = prod.get(i.productName) || { name: i.productName, units: 0, orders: 0, revenue: 0, paidRevenue: 0 };
+      p.units += i.quantity; p.revenue += i.lineTotalCents; if (o.paid === true) p.paidRevenue += i.lineTotalCents;
+      if (!seen.has(i.productName)) { p.orders++; seen.add(i.productName); }
+      prod.set(i.productName, p);
     }
   }
+  const byProduct = [...prod.values()].sort((a, b) => b.units - a.units);
+
+  const days = new Map();
+  for (const o of live) {
+    if (!o.createdAtMillis) continue;
+    const k = toNyLocalInput(o.createdAtMillis).slice(0, 10);
+    const d = days.get(k) || { orders: 0, units: 0 }; d.orders++; d.units += unitsOf(o); days.set(k, d);
+  }
+  const dayList = [...days.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const maxDay = Math.max(1, ...dayList.map(([, d]) => d.orders));
+
+  // What has to be ordered from the supplier: every non-cancelled order, summed per product / size / color.
+  const totals = new Map();
+  for (const o of live) for (const i of o.items || []) {
+    const k = `${i.productName}|${i.size}|${i.color}`;
+    const t = totals.get(k) || { name: i.productName, size: i.size, color: i.color, qty: 0 };
+    t.qty += i.quantity; totals.set(k, t);
+  }
   const want = [...totals.values()].sort((a, b) => a.name.localeCompare(b.name) || a.size.localeCompare(b.size, undefined, { numeric: true }) || a.color.localeCompare(b.color));
-  const unsent = (await fs.getDocs(fs.query(fs.collection(db, 'mail'), fs.where('status', '==', 'failed'), fs.limit(20)))).size;
+
   const next = status.nextOpensAtMillis;
+  const card = (title, big, sub) => h('div', { class: 'card2' }, h('h3', {}, title), h('p', { class: 'big' }, big), h('p', { class: 'fine', style: 'margin-top:.5rem' }, sub));
+  const table = (heads, rows, foot) => h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, heads.map((x) => h('th', { scope: 'col' }, x)))),
+    h('tbody', {}, rows.map((r) => h('tr', {}, r.map((c) => h('td', {}, c)))), foot ? h('tr', {}, foot.map((c) => h('td', { style: 'font-weight:700' }, c))) : null)));
+  const section = (id, title, ...kids) => h('section', { class: 'panel', 'aria-labelledby': id }, h('h2', { id }, title), ...kids);
 
   clear(out).append(
     h('div', { class: 'cards' },
-      h('div', { class: 'card2' }, h('h3', {}, 'Store status'), h('p', { class: 'big' }, status.open ? 'Open' : 'Closed'), h('p', { class: 'fine', style: 'margin-top:.5rem' }, status.open ? `Closes ${fmtNY(status.closesAtMillis)}` : (next ? `Opens ${fmtNY(next, { year: true })}` : 'No upcoming schedule'))),
-      h('div', { class: 'card2' }, h('h3', {}, 'Orders awaiting action'), h('p', { class: 'big' }, String(awaiting.size)), h('p', { class: 'fine', style: 'margin-top:.5rem' }, 'Status: submitted')),
-      h('div', { class: 'card2' }, h('h3', {}, 'Items requested'), h('p', { class: 'big' }, String(units)), h('p', { class: 'fine', style: 'margin-top:.5rem' }, `${liveOrders} order${liveOrders === 1 ? '' : 's'}, cancelled excluded`)),
-      h('div', { class: 'card2' }, h('h3', {}, 'Failed emails'), h('p', { class: 'big' }, String(unsent)), h('p', { class: 'fine', style: 'margin-top:.5rem' }, unsent ? 'Open the order to retry' : 'None')),
+      card('Store status', status.open ? 'Open' : 'Closed', status.open ? `Closes ${fmtNY(status.closesAtMillis)}` : (next ? `Opens ${fmtNY(next, { year: true })}` : 'No upcoming schedule')),
+      card('Orders', String(live.length), `${orders.length - live.length} cancelled`),
+      card('Items sold', String(units), live.length ? `${(units / live.length).toFixed(1)} per order on average` : 'No orders yet'),
+      card('Order value', money(revenue), `${money(collected)} paid · ${money(revenue - collected)} still to collect`),
+      card('Paid', `${paidOrders.length} / ${live.length}`, `${pct(paidOrders.length, live.length)} of orders marked paid`),
+      card('Not paid yet', String(unpaidOrders.length), `${awaitingAction} still "submitted" (not confirmed)`),
+      card('Failed emails', String(failedMail), failedMail ? 'Open the order to retry' : 'None'),
     ),
-    h('section', { class: 'panel', 'aria-labelledby': 'ov-recent' }, h('h2', { id: 'ov-recent' }, 'Recent orders'), ordersTable(recent.docs.map(snapOrder))),
-    h('section', { class: 'panel', 'aria-labelledby': 'ov-inv' }, h('h2', { id: 'ov-inv' }, 'What to order'),
-      h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Totals across all orders that are not cancelled. Use this when the drop has closed and you place the supplier order.'),
-      want.length ? h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Product', 'Size', 'Color', 'Quantity'].map((x) => h('th', { scope: 'col' }, x)))),
-        h('tbody', {}, want.map((a) => h('tr', {}, h('td', {}, a.name), h('td', {}, a.size), h('td', {}, a.color), h('td', {}, String(a.qty)))),
-          h('tr', {}, h('td', { colspan: 3, style: 'text-align:right;font-weight:700' }, 'Total'), h('td', { style: 'font-weight:700' }, String(units)))))) : h('p', { class: 'empty' }, 'No orders yet.'),
+    section('ov-status', 'Orders by status', table(['Status', 'Orders', 'Paid', 'Not paid', 'Value'], byStatus, ['Total (not cancelled)', String(live.length), String(paidOrders.length), String(unpaidOrders.length), money(revenue)])),
+    section('ov-pay', 'Payments received', h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Based on the Paid checkbox you set on each order.'),
+      table(['Method', 'Orders', 'Amount'], byMethod, ['Total collected', String(paidOrders.length), money(collected)]),
+      h('p', { class: 'fine', style: 'margin-top:.6rem' }, `Still to collect: ${money(revenue - collected)} across ${unpaidOrders.length} order${unpaidOrders.length === 1 ? '' : 's'}.`)),
+    section('ov-prod', 'Sales by product', byProduct.length ? table(['Product', 'Units', 'Orders', 'Order value', 'Paid'], byProduct.map((p) => [p.name, String(p.units), String(p.orders), money(p.revenue), money(p.paidRevenue)])) : h('p', { class: 'empty' }, 'No orders yet.')),
+    section('ov-days', 'Orders per day (New York time)', dayList.length
+      ? h('div', { class: 'bars' }, dayList.map(([k, d]) => h('div', { class: 'barrow' }, h('span', { class: 'barrow__l' }, k), h('span', { class: 'barrow__b' }, h('span', { style: `width:${Math.max(2, Math.round((d.orders / maxDay) * 100))}%` })), h('span', { class: 'barrow__v' }, `${d.orders} order${d.orders === 1 ? '' : 's'} · ${d.units} item${d.units === 1 ? '' : 's'}`))))
+      : h('p', { class: 'empty' }, 'No orders yet.')),
+    section('ov-inv', 'What to order', h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Totals across all orders that are not cancelled. Use this when the drop has closed and you place the supplier order.'),
+      want.length ? table(['Product', 'Size', 'Color', 'Quantity'], want.map((a) => [a.name, a.size, a.color, String(a.qty)]), ['', '', 'Total', String(units)]) : h('p', { class: 'empty' }, 'No orders yet.'),
       all.size >= 1000 ? h('p', { class: 'fine' }, 'Showing the latest 1000 orders only.') : null),
-    h('p', { class: 'fine' }, `${scheds.size} schedule${scheds.size === 1 ? '' : 's'} configured · ${products.length} product${products.length === 1 ? '' : 's'}`),
+    section('ov-recent', 'Recent orders', ordersTable(recent.docs.map(snapOrder))),
+    section('ov-store', 'Store details', h('dl', { class: 'kv' },
+      h('dt', {}, 'Customers'), h('dd', {}, `${customers} unique email${customers === 1 ? '' : 's'}`),
+      h('dt', {}, 'Average order'), h('dd', {}, live.length ? money(Math.round(revenue / live.length)) : '-'),
+      h('dt', {}, 'First order'), h('dd', {}, times.length ? fmtNY(Math.min(...times), { year: true }) : '-'),
+      h('dt', {}, 'Latest order'), h('dd', {}, times.length ? fmtNY(Math.max(...times), { year: true }) : '-'),
+      h('dt', {}, 'Products'), h('dd', {}, `${products.filter((p) => p.active).length} active, ${products.filter((p) => !p.active).length} hidden`),
+      h('dt', {}, 'Schedules'), h('dd', {}, `${scheds.size} configured`))),
   );
 }
+
 
 /* ============================== orders ============================== */
 
 const snapOrder = (d) => ({ id: d.id, ...d.data(), createdAtMillis: ms(d.data().createdAt) });
 
+const payTag = (o) => (o.status === 'cancelled' ? tag('cancelled', '-') : (o.paid === true ? tag('paid', `Paid${PAY_LABEL[o.paymentMethod] ? ` · ${PAY_LABEL[o.paymentMethod]}` : ''}`) : tag('unpaid', 'Not paid')));
+
 function ordersTable(orders, onOpen) {
   if (!orders.length) return h('p', { class: 'empty' }, 'No orders yet.');
   const open = onOpen || ((o) => { tab = 'orders'; location.hash = `order=${o.id}`; go('orders'); });
   return h('div', { class: 'tablewrap' }, h('table', { class: 't' },
-    h('thead', {}, h('tr', {}, ['Order', 'Placed (ET)', 'Customer', 'Total', 'Status', ''].map((x) => h('th', { scope: 'col' }, x)))),
+    h('thead', {}, h('tr', {}, ['Order', 'Placed (ET)', 'Customer', 'Total', 'Status', 'Payment', ''].map((x) => h('th', { scope: 'col' }, x)))),
     h('tbody', {}, orders.map((o) => h('tr', { class: 'click', onclick: () => open(o) },
       h('td', { class: 'mono' }, o.orderNumber), h('td', {}, fmtNY(o.createdAtMillis)),
       h('td', {}, o.customerName, h('br'), h('span', { class: 'fine' }, o.customerEmail)),
-      h('td', {}, money(o.subtotalCents)), h('td', {}, tag(o.status, STATUS_LABEL[o.status] || o.status)),
+      h('td', {}, money(o.subtotalCents)), h('td', {}, tag(o.status, STATUS_LABEL[o.status] || o.status)), h('td', {}, payTag(o)),
       h('td', {}, h('button', { class: 'linkbtn', type: 'button', onclick: (e) => { e.stopPropagation(); open(o); } }, 'Open', h('span', { class: 'sr-only' }, ` ${o.orderNumber}`))))))));
 }
 
 async function viewOrders() {
   const { db, fs } = F; const out = panel;
-  const state = { status: '', q: '', rows: [], last: null, done: false };
+  const state = { status: '', pay: '', q: '', rows: [], last: null, done: false };
   const list = h('div', {});
   const more = h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => fetchPage(true) }, 'Load more');
   const statusSel = h('select', { id: 'o-status', onchange: () => { state.status = statusSel.value; reset(); } },
     h('option', { value: '' }, 'All statuses'), ...Object.keys(STATUS_LABEL).map((s) => h('option', { value: s }, STATUS_LABEL[s])));
+  const paySel = h('select', { id: 'o-pay', onchange: () => { state.pay = paySel.value; draw(); } }, h('option', { value: '' }, 'Paid and not paid'), h('option', { value: 'paid' }, 'Paid only'), h('option', { value: 'unpaid' }, 'Not paid only'));
   const search = h('input', { type: 'text', id: 'o-q', placeholder: 'Order number, name or email', 'aria-describedby': 'o-help', oninput: () => { state.q = search.value.trim(); draw(); } });
   const find = h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => findExact().catch(fail) }, 'Find order number');
 
@@ -208,7 +276,10 @@ async function viewOrders() {
   function reset() { state.rows = []; state.last = null; fetchPage(false).catch(fail); }
   function draw() {
     const q = state.q.toLowerCase();
-    const rows = q ? state.rows.filter((o) => [o.orderNumber, o.customerName, o.customerEmail, o.customerPhone].some((x) => String(x || '').toLowerCase().includes(q))) : state.rows;
+    let rows = state.rows;
+    if (state.pay === 'paid') rows = rows.filter((o) => o.paid === true);
+    if (state.pay === 'unpaid') rows = rows.filter((o) => o.paid !== true && o.status !== 'cancelled');
+    if (q) rows = rows.filter(($1);
     clear(list).append(ordersTable(rows, safeOpen));
     more.hidden = state.done;
     if (q && !rows.length && !state.done) list.append(h('p', { class: 'fine' }, 'No match in the orders loaded so far. Load more, or use "Find order number" for an exact order number.'));
@@ -222,7 +293,7 @@ async function viewOrders() {
   }
 
   clear(out).append(
-    h('div', { class: 'toolbar' }, h('div', { class: 'field' }, h('label', { for: 'o-status' }, 'Status'), statusSel), h('div', { class: 'field', style: 'flex:1 1 260px' }, h('label', { for: 'o-q' }, 'Search'), search), find),
+    h('div', { class: 'toolbar' }, h('div', { class: 'field' }, h('label', { for: 'o-status' }, 'Status'), statusSel), h('div', { class: 'field' }, h('label', { for: 'o-pay' }, 'Payment'), paySel), h('div', { class: 'field', style: 'flex:1 1 260px' }, h('label', { for: 'o-q' }, 'Search'), search), find),
     h('p', { class: 'fine', id: 'o-help', style: 'margin-bottom:1rem' }, 'Search filters the orders loaded below. Payment is never collected online: every order is unpaid until you arrange it with the customer.'),
     h('section', { class: 'panel' }, list, h('div', { style: 'margin-top:1rem' }, more)));
   await fetchPage(false);
@@ -231,6 +302,24 @@ async function viewOrders() {
     const snap = await fs.getDoc(fs.doc(db, 'orders', id)).catch(() => null);
     if (snap && snap.exists()) safeOpen(snapOrder(snap));
   }
+}
+
+function paymentBox(o) {
+  const locked = o.status === 'cancelled';
+  const cb = h('input', { type: 'checkbox', id: 'pay-paid', checked: o.paid === true, disabled: locked });
+  const sel = h('select', { id: 'pay-method', disabled: locked }, h('option', { value: '' }, 'Choose method...'), ...Object.entries(PAY_LABEL).map(([v, l]) => h('option', { value: v, selected: o.paymentMethod === v }, l)));
+  const save = h('button', { class: 'btn btn--primary btn--sm', type: 'button', disabled: locked }, 'Save payment');
+  save.onclick = () => guarded(save, async () => {
+    if (cb.checked && !sel.value) { toast('Choose how they paid: cash, Venmo or Zelle.'); sel.focus(); return; }
+    await callable('adminSetOrderPayment', { orderId: o.id, paid: cb.checked, method: sel.value || null });
+    ordersDirty = true; toast(`${o.orderNumber} marked ${cb.checked ? 'paid' : 'not paid'}`); await openOrder(o);
+  });
+  return h('div', {},
+    h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'Payment'),
+    h('div', { class: 'row-actions', style: 'align-items:center' },
+      h('label', { for: 'pay-paid', style: 'display:inline-flex;gap:.5rem;align-items:center;min-height:44px' }, cb, 'Paid'),
+      h('label', { for: 'pay-method', class: 'sr-only' }, 'Payment method'), sel, save),
+    h('p', { class: 'fine', style: 'margin-top:.5rem' }, locked ? 'This order is cancelled, so it cannot be marked paid.' : (o.paid === true && o.paidAtMillis ? `Marked paid ${fmtNY(o.paidAtMillis, { year: true })}. ` : '') + 'Money is never collected on the website: tick Paid after you receive it by cash, Venmo or Zelle.'));
 }
 
 let ordersDirty = false;     // set when an order changed, so the lists behind the dialog are refreshed when it closes
@@ -263,13 +352,14 @@ async function openOrder(o) {
   clear(dlg).append(
     h('div', { class: 'dlg-head' }, h('h2', { id: 'order-dlg-t' }, `Order ${o.orderNumber}`), h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'Close order', onclick: () => dlg.close() }, icon.close())),
     h('div', { style: 'padding:1.25rem;display:grid;gap:1.25rem' },
-      h('div', {}, tag(o.status, STATUS_LABEL[o.status]), ' ', tag('pending', 'UNPAID: no online payment')),
+      h('div', {}, tag(o.status, STATUS_LABEL[o.status]), ' ', payTag(o)),
       h('dl', { class: 'kv' },
         h('dt', {}, 'Placed'), h('dd', {}, fmtNY(o.createdAtMillis, { year: true })),
         h('dt', {}, 'Customer'), h('dd', {}, o.customerName),
         h('dt', {}, 'Email'), h('dd', {}, h('a', { href: `mailto:${o.customerEmail}` }, o.customerEmail)),
         o.customerPhone ? [h('dt', {}, 'Phone'), h('dd', {}, h('a', { href: `tel:${o.customerPhone}` }, o.customerPhone))] : null,
         h('dt', {}, 'Fulfillment'), h('dd', {}, (o.fulfillmentMethod === 'arranged_separately' ? 'To be arranged separately' : o.fulfillmentMethod) + (o.fulfillmentDetails ? `: ${o.fulfillmentDetails}` : ''))),
+      paymentBox(o),
       h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Item', 'Size', 'Color', 'SKU', 'Qty', 'Unit', 'Total'].map((x) => h('th', { scope: 'col' }, x)))),
         h('tbody', {}, o.items.map((i) => h('tr', {}, h('td', {}, i.productName), h('td', {}, i.size), h('td', {}, i.color), h('td', { class: 'mono' }, i.sku || ''), h('td', {}, String(i.quantity)), h('td', {}, money(i.unitPriceCents)), h('td', {}, money(i.lineTotalCents)))),
           h('tr', {}, h('td', { colspan: 6, style: 'text-align:right;font-weight:700' }, 'Subtotal'), h('td', { style: 'font-weight:700' }, money(o.subtotalCents)))))),

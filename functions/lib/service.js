@@ -289,7 +289,10 @@ async function submitOrder(db, data, ctx) {
       subtotalCents: priced.subtotalCents,
       currency: 'USD',
       status: 'submitted',
-      paymentStatus: 'not_collected_online',
+      paymentStatus: 'not_collected_online',   // the website never collects money; `paid` below is recorded by hand by an admin
+      paid: false,
+      paymentMethod: null,
+      paidAtMillis: null,
       statusHistory: [{ status: 'submitted', byUid: null, atMillis: nowMs }],
       notificationStatus: { admin: 'pending', customer: 'pending' },
       createdAt: nowDate,
@@ -334,6 +337,33 @@ async function adminUpdateOrderStatus(db, uid, orderId, newStatus, now = () => D
   });
 }
 
+/** An admin records that an order was (or was not) paid, and how. Payment happens outside the website. */
+async function adminSetOrderPayment(db, uid, orderId, data, now = () => Date.now()) {
+  if (typeof orderId !== 'string' || !/^[A-Za-z0-9]{10,40}$/.test(orderId)) throw new HttpError('invalid-argument', 'Invalid order id.');
+  if (!data || typeof data.paid !== 'boolean') throw new HttpError('invalid-argument', 'Say whether the order is paid.');
+  const method = data.method === undefined || data.method === null || data.method === '' ? null : data.method;
+  if (method !== null && !L.PAYMENT_METHODS.includes(method)) throw new HttpError('invalid-argument', 'Payment method must be cash, Venmo or Zelle.');
+  if (data.paid && method === null) throw new HttpError('invalid-argument', 'Choose how it was paid: cash, Venmo or Zelle.');
+  const ref = db.collection('orders').doc(orderId);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
+    const o = snap.data();
+    if (data.paid && o.status === 'cancelled') throw new HttpError('failed-precondition', 'A cancelled order cannot be marked paid.');
+    const nowMs = now();
+    const patch = {
+      paid: data.paid,
+      paymentMethod: data.paid ? method : null,
+      paidAtMillis: data.paid ? nowMs : null,
+      paidByUid: data.paid ? uid : null,
+      paymentHistory: [...(o.paymentHistory || []), { paid: data.paid, method: data.paid ? method : null, byUid: uid, atMillis: nowMs }],
+      updatedAt: toDate(nowMs),
+    };
+    tx.update(ref, patch);
+    return { paid: patch.paid, paymentMethod: patch.paymentMethod, paidAtMillis: patch.paidAtMillis };
+  });
+}
+
 /** Permanently delete an order and its email records. Admin-only (checked by the caller). */
 async function adminDeleteOrder(db, orderId) {
   if (typeof orderId !== 'string' || !/^[A-Za-z0-9]{10,40}$/.test(orderId)) throw new HttpError('invalid-argument', 'Invalid order id.');
@@ -362,6 +392,6 @@ async function adminResendMail(db, mailId, now = () => Date.now()) {
 
 module.exports = {
   RATE, getStoreStatus, adminSaveSchedule, adminDeleteSchedule, getPublicSettings, adminSaveSettings,
-  adminSaveProduct, submitOrder, adminUpdateOrderStatus, adminDeleteOrder, adminResendMail, scheduleFromDoc,
+  adminSaveProduct, submitOrder, adminUpdateOrderStatus, adminSetOrderPayment, adminDeleteOrder, adminResendMail, scheduleFromDoc,
   getMailWebhook, adminGetMailConfig, adminSaveMailWebhook, adminSendTestMail,
 };

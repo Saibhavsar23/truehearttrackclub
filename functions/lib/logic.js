@@ -206,7 +206,10 @@ function money(cents) {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+const PAYMENT_METHODS = ['cash', 'venmo', 'zelle'];
+
 module.exports = {
+  PAYMENT_METHODS,
   LIMITS, ORDER_STATUSES, TRANSITIONS, canTransition, HttpError, cleanText,
   validateOrderRequest, priceOrder, variantIdFor, slugify, validateProductInput, validateScheduleName,
   hashKey, formatOrderNumber, money,
