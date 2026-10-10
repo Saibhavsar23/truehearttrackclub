@@ -42,7 +42,7 @@ const auth = getAuth();
     if (!found) console.log('No administrators.');
     return;
   }
-  const user = await auth.getUserByEmail(email).catch(() => null);
+  const user = await auth.getUserByEmail(email).catch((e) => { if (e && e.code === 'auth/user-not-found') return null; throw e; });
   if (!user) { console.error(`No Firebase Auth user with email ${email}. Create the user first (Firebase console > Authentication > Users > Add user).`); process.exit(1); }
   const claims = { ...(user.customClaims || {}) };
   if (action === 'add') {
@@ -55,4 +55,8 @@ const auth = getAuth();
     await auth.revokeRefreshTokens(user.uid);
     console.log(`${email} is no longer an administrator. Server operations are blocked immediately; their existing sessions are revoked.`);
   }
-})().catch((e) => { console.error(e.message); process.exit(1); });
+})().catch((e) => {
+  console.error(e.message);
+  if (/credential|default credentials|permission|403|401|ADC/i.test(String(e.message) + String(e.code))) console.error('\nThis looks like a credentials problem, not a missing user. Run:  gcloud auth application-default login   (then retry)');
+  process.exit(1);
+});
