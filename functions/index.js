@@ -88,6 +88,17 @@ exports.adminSetOrderPayment = onCall(base, wrap(async (request) => {
   const d = request.data || {};
   return svc.adminSetOrderPayment(db, uid, d.orderId, d);
 }));
+exports.adminListAdmins = onCall(base, wrap(async (request) => {
+  await requireAdmin(request);
+  return { admins: await svc.listAdmins(getAuth()), you: request.auth.uid };
+}));
+exports.adminSetAdmin = onCall(base, wrap(async (request) => {
+  const uid = await requireAdmin(request);
+  const d = request.data || {};
+  const out = await svc.setAdmin(getAuth(), uid, d.email, d.admin);
+  logger.warn(`admin access ${out.admin ? 'granted to' : 'removed from'} ${out.email} by ${uid}`);
+  return out;
+}));
 exports.adminDeleteOrder = onCall(base, wrap(async (request) => {
   await requireAdmin(request);
   return svc.adminDeleteOrder(db, request.data && request.data.orderId);

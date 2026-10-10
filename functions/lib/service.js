@@ -367,6 +367,51 @@ async function adminSetOrderPayment(db, uid, orderId, data, now = () => Date.now
   });
 }
 
+/* ------------------------------- administrators ------------------------------ */
+// Admin = Firebase Auth custom claim { admin: true }. Only an existing admin can reach these (checked in index.js).
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+async function listAdmins(auth) {
+  const out = [];
+  let token;
+  do {
+    const page = await auth.listUsers(1000, token);
+    for (const u of page.users) {
+      if (u.customClaims && u.customClaims.admin === true) {
+        out.push({ uid: u.uid, email: u.email || '', disabled: u.disabled === true, createdMillis: u.metadata.creationTime ? Date.parse(u.metadata.creationTime) : null, lastSignInMillis: u.metadata.lastSignInTime ? Date.parse(u.metadata.lastSignInTime) : null });
+      }
+    }
+    token = page.pageToken;
+  } while (token);
+  return out.sort((a, b) => a.email.localeCompare(b.email));
+}
+
+/** Grant or revoke admin for an EXISTING account, identified by email. */
+async function setAdmin(auth, callerUid, rawEmail, makeAdmin) {
+  const email = typeof rawEmail === 'string' ? rawEmail.trim().toLowerCase() : '';
+  if (!EMAIL_RE.test(email) || email.length > 254) throw new HttpError('invalid-argument', 'Enter the email address of an existing account.');
+  if (typeof makeAdmin !== 'boolean') throw new HttpError('invalid-argument', 'Say whether to add or remove the administrator.');
+  const user = await auth.getUserByEmail(email).catch((e) => { if (e && e.code === 'auth/user-not-found') return null; throw e; });
+  if (!user) throw new HttpError('not-found', 'There is no account with that email. They need to have an account first (create it in Firebase console > Authentication > Users).');
+  const claims = { ...(user.customClaims || {}) };
+  if (makeAdmin) {
+    if (user.disabled) throw new HttpError('failed-precondition', 'That account is disabled, so it cannot be made an administrator.');
+    if (claims.admin === true) throw new HttpError('already-exists', `${email} is already an administrator.`);
+    claims.admin = true;
+    await auth.setCustomUserClaims(user.uid, claims);
+    return { email, admin: true };
+  }
+  if (user.uid === callerUid) throw new HttpError('failed-precondition', 'You cannot remove your own administrator access. Ask another administrator to do it.');
+  if (claims.admin !== true) throw new HttpError('failed-precondition', `${email} is not an administrator.`);
+  const admins = await listAdmins(auth);
+  if (admins.filter((a) => !a.disabled).length <= 1) throw new HttpError('failed-precondition', 'You cannot remove the last administrator.');
+  delete claims.admin;
+  await auth.setCustomUserClaims(user.uid, claims);
+  await auth.revokeRefreshTokens(user.uid);   // their existing sign-ins stop working
+  return { email, admin: false };
+}
+
 /** Permanently delete an order and its email records. Admin-only (checked by the caller). */
 async function adminDeleteOrder(db, orderId) {
   if (typeof orderId !== 'string' || !/^[A-Za-z0-9]{10,40}$/.test(orderId)) throw new HttpError('invalid-argument', 'Invalid order id.');
@@ -397,6 +442,6 @@ async function adminResendMail(db, mailId, now = () => Date.now()) {
 
 module.exports = {
   RATE, getStoreStatus, adminSaveSchedule, adminDeleteSchedule, getPublicSettings, adminSaveSettings,
-  adminSaveProduct, submitOrder, adminUpdateOrderStatus, adminSetOrderPayment, adminDeleteOrder, adminResendMail, scheduleFromDoc,
+  adminSaveProduct, submitOrder, listAdmins, setAdmin, adminUpdateOrderStatus, adminSetOrderPayment, adminDeleteOrder, adminResendMail, scheduleFromDoc,
   getMailWebhook, adminGetMailConfig, adminSaveMailWebhook, adminSendTestMail,
 };

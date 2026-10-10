@@ -31,7 +31,7 @@ const product = () => ({ name: 'Callable Tee', description: '', priceCents: 2000
 test.before(async () => { await wipeFirestore(); });
 
 test('admin operations reject anonymous callers', async () => {
-  for (const fn of ['adminSaveProduct', 'adminSaveSchedule', 'adminDeleteSchedule', 'adminSaveSettings', 'adminUpdateOrderStatus', 'adminSetOrderPayment', 'adminDeleteOrder', 'adminResendMail', 'adminGetMailConfig', 'adminSaveMailWebhook', 'adminSendTestMail']) {
+  for (const fn of ['adminSaveProduct', 'adminSaveSchedule', 'adminDeleteSchedule', 'adminSaveSettings', 'adminUpdateOrderStatus', 'adminSetOrderPayment', 'adminListAdmins', 'adminSetAdmin', 'adminDeleteOrder', 'adminResendMail', 'adminGetMailConfig', 'adminSaveMailWebhook', 'adminSendTestMail']) {
     const r = await call(fn, {});
     assert.equal(r.body.error && r.body.error.status, 'PERMISSION_DENIED', fn);
   }
@@ -95,6 +95,41 @@ test('submitOrder through the callable succeeds while open, and a hostile payloa
   assert.equal(good.body.result.subtotalCents, 4000);
   assert.equal(good.body.result.orderNumber, 'THTC-00001');
   assert.equal((await db.collection('orders').get()).size, 1);
+});
+
+test('administrators can promote an existing account and demote others; safeguards hold', async () => {
+  const boss = await signUp('owner@example.com');
+  await auth.setCustomUserClaims(boss.localId, { admin: true });
+  const bossTok = await signIn('owner@example.com');
+  const pal = await signUp('pal@example.com');
+  const palTok = await signIn('pal@example.com');
+  // a normal account cannot list or promote (not even itself)
+  assert.equal((await call('adminListAdmins', {}, palTok)).body.error.status, 'PERMISSION_DENIED');
+  assert.equal((await call('adminSetAdmin', { email: 'pal@example.com', admin: true }, palTok)).body.error.status, 'PERMISSION_DENIED');
+  // validation
+  assert.equal((await call('adminSetAdmin', { email: 'nobody@example.com', admin: true }, bossTok)).body.error.status, 'NOT_FOUND');
+  assert.equal((await call('adminSetAdmin', { email: 'not-an-email', admin: true }, bossTok)).body.error.status, 'INVALID_ARGUMENT');
+  assert.equal((await call('adminSetAdmin', { email: 'pal@example.com' }, bossTok)).body.error.status, 'INVALID_ARGUMENT');
+  // promote
+  const ok = await call('adminSetAdmin', { email: 'Pal@Example.com', admin: true }, bossTok);
+  assert.deepEqual(ok.body.result, { email: 'pal@example.com', admin: true });
+  assert.equal((await call('adminSetAdmin', { email: 'pal@example.com', admin: true }, bossTok)).body.error.status, 'ALREADY_EXISTS');
+  const list = await call('adminListAdmins', {}, bossTok);
+  assert.ok(list.body.result.admins.some((a) => a.email === 'pal@example.com'));
+  assert.equal(list.body.result.you, boss.localId);
+  // the new admin works after signing in again
+  const palTok2 = await signIn('pal@example.com');
+  assert.ok((await call('adminListAdmins', {}, palTok2)).body.result);
+  // cannot remove yourself
+  assert.equal((await call('adminSetAdmin', { email: 'owner@example.com', admin: false }, bossTok)).body.error.status, 'FAILED_PRECONDITION');
+  // demote: server access stops at once even with the old token
+  assert.deepEqual((await call('adminSetAdmin', { email: 'pal@example.com', admin: false }, bossTok)).body.result, { email: 'pal@example.com', admin: false });
+  assert.equal((await call('adminListAdmins', {}, palTok2)).body.error.status, 'PERMISSION_DENIED');
+  // the last remaining administrator is protected (pal re-promoted, then pal tries to remove owner, then owner is the only...)
+  await call('adminSetAdmin', { email: 'pal@example.com', admin: true }, bossTok);
+  const palTok3 = await signIn('pal@example.com');
+  assert.deepEqual((await call('adminSetAdmin', { email: 'owner@example.com', admin: false }, palTok3)).body.result, { email: 'owner@example.com', admin: false });
+  assert.equal((await call('adminSetAdmin', { email: 'pal@example.com', admin: false }, palTok3)).body.error.status, 'FAILED_PRECONDITION'); // yourself
 });
 
 test('admin can store the Make webhook; it is validated server-side and never echoed back', async () => {

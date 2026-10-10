@@ -598,6 +598,7 @@ function editSchedule(s) {
 async function viewSettings() {
   const { db, fs } = F; const out = panel;
   const snap = await fs.getDoc(fs.doc(db, 'settings', 'public'));
+  const adminsHolder = h('div', {}, h('section', { class: 'panel' }, h('h2', {}, 'Administrators'), h('p', { class: 'empty' }, 'Loading administrators...')));
   const mailHolder = h('div', {}, h('section', { class: 'panel' }, h('h2', {}, 'Email (Make.com)'), h('p', { class: 'empty' }, 'Loading email settings...')));
   const cur = snap.exists() ? snap.data() : { fulfillmentMethods: [], checkoutNotice: '' };
   const methods = (cur.fulfillmentMethods || []).map((x) => ({ ...x }));
@@ -624,11 +625,42 @@ async function viewSettings() {
       h('div', { class: 'field', style: 'margin-top:1.2rem' }, h('label', { for: 'set-notice' }, 'Extra checkout notice (optional): shown above the Submit button, e.g. pickup or payment instructions once decided'), notice),
       save),
     mailHolder,
-    h('section', { class: 'panel' }, h('h2', {}, 'Administrators'), h('p', { class: 'fine' }, 'Admin access is granted only by the site owner from a terminal, never from this page: ', h('code', { class: 'mono' }, 'node scripts/set-admin.js add person@example.com'), '. See the README, "Adding and removing administrators".')),
+    adminsHolder,
   );
   draw();
+  const loadAdmins = () => callable('adminListAdmins', {}).then((r) => adminsHolder.replaceChildren(adminsPanel(r, loadAdmins)))
+    .catch((e) => adminsHolder.replaceChildren(h('section', { class: 'panel' }, h('h2', {}, 'Administrators'), h('div', { class: 'notice notice--error', role: 'alert' }, 'Could not load administrators: ' + e.message))));
+  loadAdmins();
   callable('adminGetMailConfig', {}).then((cfg) => mailHolder.replaceChildren(mailPanel(cfg)))
     .catch((e) => mailHolder.replaceChildren(h('section', { class: 'panel' }, h('div', { class: 'notice notice--error', role: 'alert' }, 'Could not load email settings: ' + e.message))));
+}
+
+function adminsPanel(data, reload) {
+  const email = h('input', { type: 'email', id: 'adm-email', autocomplete: 'off', placeholder: 'person@example.com', spellcheck: 'false' });
+  const add = h('button', { class: 'btn btn--primary btn--sm', type: 'button' }, 'Make administrator');
+  add.onclick = () => guarded(add, async () => {
+    const v = email.value.trim();
+    if (!v) { toast('Type the email address of an existing account first.'); email.focus(); return; }
+    if (!confirm(`Give ${v} full administrator access? They will be able to see every order and customer, change products, schedules and settings, and add or remove other administrators.`)) return;
+    const r = await callable('adminSetAdmin', { email: v, admin: true });
+    toast(`${r.email} is now an administrator. They should sign out and back in.`);
+    await reload();
+  });
+  const rows = data.admins.map((a) => {
+    const you = a.uid === data.you;
+    const rm = h('button', { class: 'linkbtn', type: 'button', disabled: you }, 'Remove', h('span', { class: 'sr-only' }, ` ${a.email}`));
+    rm.onclick = () => {
+      if (!confirm(`Remove administrator access from ${a.email}? Their open sessions are signed out and they lose access to the dashboard.`)) return;
+      guarded(rm, async () => { await callable('adminSetAdmin', { email: a.email, admin: false }); toast(`${a.email} is no longer an administrator.`); await reload(); });
+    };
+    return h('tr', {}, h('td', {}, a.email, you ? h('span', { class: 'fine' }, ' (you)') : null, a.disabled ? h('span', { class: 'fine' }, ' (disabled)') : null), h('td', {}, a.lastSignInMillis ? fmtNY(a.lastSignInMillis, { year: true }) : 'never'), h('td', {}, you ? h('span', { class: 'fine' }, 'n/a') : rm));
+  });
+  return h('section', { class: 'panel', 'aria-labelledby': 'adm-h' }, h('h2', { id: 'adm-h' }, 'Administrators'),
+    h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Administrators can see all orders and customer details and change everything in this dashboard. Only add people you trust.'),
+    h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Administrator', 'Last sign-in (ET)', ''].map((x) => h('th', { scope: 'col' }, x)))), h('tbody', {}, rows))),
+    h('div', { class: 'field', style: 'margin-top:1.2rem;max-width:420px' }, h('label', { for: 'adm-email' }, 'Add an administrator by email'), email),
+    h('div', { class: 'row-actions' }, add),
+    h('p', { class: 'fine', style: 'margin-top:.6rem' }, 'The person must already have an account (Firebase console > Authentication > Users > Add user). After you add them, they sign out and back in to see the dashboard.'));
 }
 
 function mailPanel(cfg) {

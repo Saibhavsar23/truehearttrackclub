@@ -212,6 +212,11 @@ Requires Java (for the Firestore emulator) and `firebase-tools`. The tests use a
 - [ ] Review `git diff main` and merge `merch-store` to `main` (Vercel deploys on merge). Verify the live site afterwards
 - [ ] (Recommended) App Check; screen-reader pass (VoiceOver/NVDA) on checkout
 
+## Administrators
+Admin → Settings → Administrators lists everyone with access. Type the email of an **existing account** and press *Make administrator*
+(they sign out and in again). *Remove* revokes access and signs them out. You cannot remove yourself or the last administrator.
+The terminal script `scripts/set-admin.js` still works as a backup (and is how the very first admin is created).
+
 ## Security checklist (owner actions)
 
 Already enforced in code: browsers cannot write to the database; every admin action re-checks the admin claim on the server;
