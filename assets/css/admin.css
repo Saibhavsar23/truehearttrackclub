@@ -16,7 +16,7 @@ body.admin{ background:#0d0d0f; }
 .toolbar{ display:flex; gap:.7rem; flex-wrap:wrap; align-items:end; margin-bottom:1rem; }
 .toolbar .field{ margin:0; }
 .toolbar select,.field select{ min-height:50px; padding:0 .8rem; background:var(--black); border:1px solid var(--line-strong); border-radius:2px; color:#fff; }
-.tablewrap{ overflow-x:auto; }
+.tablewrap{ overflow-x:auto; position:relative; }
 table.t{ width:100%; border-collapse:collapse; font-size:.92rem; }
 table.t th{ text-align:left; padding:.6rem .7rem; font:600 .7rem/1 var(--body); letter-spacing:.14em; text-transform:uppercase; color:var(--faint); border-bottom:1px solid var(--line); white-space:nowrap; }
 table.t td{ padding:.7rem; border-bottom:1px solid var(--line); vertical-align:middle; }

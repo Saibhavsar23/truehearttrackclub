@@ -63,9 +63,11 @@ exports.getStoreStatus = onCall(base, wrap(async (request) => {
 
 exports.submitOrder = onCall(base, wrap(async (request) => {
   checkAppCheck(request);
-  const ip = (request.rawRequest && (request.rawRequest.headers['x-forwarded-for'] || request.rawRequest.ip)) || 'unknown';
+  // x-forwarded-for can contain client-supplied entries at the front; Google's proxy appends the real address LAST.
+  const xff = request.rawRequest && request.rawRequest.headers['x-forwarded-for'];
+  const ip = xff ? String(xff).split(',').pop().trim() : ((request.rawRequest && request.rawRequest.ip) || 'unknown');
   return svc.submitOrder(db, request.data, {
-    ip: String(ip).split(',')[0].trim(),
+    ip,
     adminEmail: ADMIN_EMAIL.value(),
     siteUrl: SITE_URL.value(),
   });

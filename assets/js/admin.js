@@ -25,8 +25,10 @@ function fail(e) {
 }
 async function guarded(btn, fn) {
   if (btn.getAttribute('aria-busy') === 'true') return;   // ignore double clicks while the first is still running
+  const label = btn.childElementCount === 0 ? btn.textContent : null;
   btn.setAttribute('aria-busy', 'true'); btn.setAttribute('aria-disabled', 'true');
-  try { return await fn(); } catch (e) { fail(e); } finally { btn.removeAttribute('aria-busy'); btn.removeAttribute('aria-disabled'); }
+  if (label) btn.textContent = 'Working…';
+  try { return await fn(); } catch (e) { fail(e); } finally { btn.removeAttribute('aria-busy'); btn.removeAttribute('aria-disabled'); if (label && btn.isConnected) btn.textContent = label; }
 }
 
 /* ============================== auth ============================== */
@@ -236,7 +238,7 @@ async function viewOverview() {
 
 const snapOrder = (d) => ({ id: d.id, ...d.data(), createdAtMillis: ms(d.data().createdAt) });
 
-const payTag = (o) => (o.status === 'cancelled' ? tag('cancelled', '-') : (o.paid === true ? tag('paid', `Paid${PAY_LABEL[o.paymentMethod] ? ` · ${PAY_LABEL[o.paymentMethod]}` : ''}`) : tag('unpaid', 'Not paid')));
+const payTag = (o) => (o.status === 'cancelled' ? h('span', { class: 'fine' }, 'n/a') : (o.paid === true ? tag('paid', `Paid${PAY_LABEL[o.paymentMethod] ? ` · ${PAY_LABEL[o.paymentMethod]}` : ''}`) : tag('unpaid', 'Not paid')));
 
 function ordersTable(orders, onOpen) {
   if (!orders.length) return h('p', { class: 'empty' }, 'No orders yet.');
@@ -282,6 +284,7 @@ async function viewOrders() {
     if (q) rows = rows.filter((o) => [o.orderNumber, o.customerName, o.customerEmail, o.customerPhone].some((x) => String(x || '').toLowerCase().includes(q)));
     clear(list).append(ordersTable(rows, safeOpen));
     more.hidden = state.done;
+    if (!rows.length && (q || state.pay)) list.replaceChildren(h('p', { class: 'empty' }, 'No orders match these filters.'));
     if (q && !rows.length && !state.done) list.append(h('p', { class: 'fine' }, 'No match in the orders loaded so far. Load more, or use "Find order number" for an exact order number.'));
   }
   async function findExact() {
@@ -294,7 +297,7 @@ async function viewOrders() {
 
   clear(out).append(
     h('div', { class: 'toolbar' }, h('div', { class: 'field' }, h('label', { for: 'o-status' }, 'Status'), statusSel), h('div', { class: 'field' }, h('label', { for: 'o-pay' }, 'Payment'), paySel), h('div', { class: 'field', style: 'flex:1 1 260px' }, h('label', { for: 'o-q' }, 'Search'), search), find),
-    h('p', { class: 'fine', id: 'o-help', style: 'margin-bottom:1rem' }, 'Search filters the orders loaded below. Payment is never collected online: every order is unpaid until you arrange it with the customer.'),
+    h('p', { class: 'fine', id: 'o-help', style: 'margin-bottom:1rem' }, 'Search filters the orders loaded below. Payment is never collected on the website: open an order and tick Paid once you receive cash, Venmo or Zelle.'),
     h('section', { class: 'panel' }, list, h('div', { style: 'margin-top:1rem' }, more)));
   await fetchPage(false);
   if (location.hash.startsWith('#order=')) {
@@ -338,14 +341,17 @@ async function openOrder(o) {
     const btn = h('button', { class: next === 'cancelled' ? 'btn btn--ghost btn--sm' : 'btn btn--primary btn--sm', type: 'button' }, ACTION_LABEL[next]);
     btn.onclick = () => {
       const msg = next === 'cancelled' ? `Cancel ${o.orderNumber}? The customer is emailed. This cannot be undone.` : `Mark ${o.orderNumber} as ${STATUS_LABEL[next].toLowerCase()}? The customer will be emailed.`;
-      if (!confirm(msg)) return;
+      const unpaid = next === 'fulfilled' && o.paid !== true ? `\n\n${o.orderNumber} is NOT marked paid yet.` : '';
+      const paidWarn = next === 'cancelled' && o.paid === true ? `\n\n${o.orderNumber} is marked PAID. Refund the customer and set it to Not paid first.` : '';
+      if (!confirm(msg + unpaid + paidWarn)) return;
       guarded(btn, async () => { await callable('adminUpdateOrderStatus', { orderId: o.id, status: next }); ordersDirty = true; toast(`${o.orderNumber}: ${STATUS_LABEL[next]}`); await openOrder(o); });
     };
     actions.append(btn);
   }
   const del = h('button', { class: 'btn btn--ghost btn--sm', type: 'button' }, 'Delete order permanently');
   del.onclick = () => {
-    if (!confirm(`Permanently delete ${o.orderNumber} (${o.customerName})? The order and its email records are erased and cannot be recovered. No email is sent to the customer.`)) return;
+    const paidNote = o.paid === true ? `\n\nWARNING: this order is marked PAID (${PAY_LABEL[o.paymentMethod] || 'method not recorded'}).` : '';
+    if (!confirm(`Permanently delete ${o.orderNumber} (${o.customerName})? The order and its email records are erased and cannot be recovered. No email is sent to the customer.${paidNote}`)) return;
     guarded(del, async () => { await callable('adminDeleteOrder', { orderId: o.id }); ordersDirty = true; toast(`${o.orderNumber} deleted`); ensureDialog('order-dlg').close(); });
   };
   const dlg = ensureDialog('order-dlg');

@@ -211,3 +211,26 @@ Requires Java (for the Firestore emulator) and `firebase-tools`. The tests use a
 - [ ] Add a real product + a schedule in the dashboard; check the shop on a real phone
 - [ ] Review `git diff main` and merge `merch-store` to `main` (Vercel deploys on merge). Verify the live site afterwards
 - [ ] (Recommended) App Check; screen-reader pass (VoiceOver/NVDA) on checkout
+
+## Security checklist (owner actions)
+
+Already enforced in code: browsers cannot write to the database; every admin action re-checks the admin claim on the server;
+prices/availability are recomputed server-side; orders are rate limited (per IP, per email, and 10 per email per day); the Make webhook
+URL is stored where no browser can read it; page headers (`vercel.json`) include a Content-Security-Policy, HSTS, no framing and nosniff.
+
+Please also do these in the consoles (they cannot be done from code):
+1. **Firebase console > Authentication > Settings > User actions:** turn OFF "Enable create (sign-up)". Admins are created by you in the
+   console, so nobody else needs to be able to register. Also turn ON "Email enumeration protection" if offered.
+2. **Use a long, unique admin password** (a password manager is ideal) and only add people you trust as admins (`scripts/set-admin.js`).
+3. **Make.com:** in the Custom webhook, turn on API key authentication and paste the same key into Admin > Settings > Email. Without it,
+   anyone who learns the webhook URL could send email from your Gmail through the scenario. Never share the URL.
+4. **App Check (recommended before a big drop):** register the site for reCAPTCHA v3 under Firebase > App Check, put the site key in
+   `assets/js/firebase-config.js` (`appCheckSiteKey`), watch the metrics for a day, then set `ENFORCE_APP_CHECK=true` in
+   `functions/.env.trueheart-fe921` and redeploy functions. This blocks scripted spam orders.
+5. **Google Cloud console > APIs & Services > Credentials:** optionally restrict the browser API key to your domains
+   (`www.truehearttrackclub.com/*`, your Vercel preview domain, and `localhost` while testing).
+6. **Budget alert:** Google Cloud console > Billing > Budgets & alerts: set a small monthly alert so unexpected traffic is noticed.
+7. When an admin is removed (`node scripts/set-admin.js remove ...`) server actions stop at once; their browser can still *read* orders
+   for up to an hour until their sign-in token expires.
+
+Local header test: `node scripts/serve-with-headers.js` serves the site with the same headers as production.

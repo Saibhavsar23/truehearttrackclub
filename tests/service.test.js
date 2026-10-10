@@ -263,12 +263,38 @@ test('payment is recorded by an admin only: needs a method, is reversible, and a
   await assert.rejects(svc.adminSetOrderPayment(db, 'u', 'doesnotexist1', { paid: false }), (e) => e.code === 'not-found');
 });
 
+test('a paid order cannot be cancelled until it is marked not paid (refund first)', async () => {
+  const { orderId } = await placeOrder();
+  await svc.adminSetOrderPayment(db, 'u', orderId, { paid: true, method: 'zelle' });
+  await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled'), (e) => e.code === 'failed-precondition' && /marked paid/.test(e.message));
+  assert.equal((await db.doc(`orders/${orderId}`).get()).data().status, 'submitted');
+  await svc.adminSetOrderPayment(db, 'u', orderId, { paid: false });
+  await svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled');
+  assert.equal((await db.doc(`orders/${orderId}`).get()).data().status, 'cancelled');
+});
+
+test('one email address cannot place more than 10 orders a day', async () => {
+  await openSchedule(Date.now() - 3600e3, Date.now() + 3 * 24 * 3600e3);
+  const pid = await makeProduct();
+  const results = [];
+  for (let i = 0; i < 12; i++) {
+    const req = orderReq(pid, M_BLACK, 1);
+    req.customer.email = 'flood@example.com';
+    // spread over distinct 10-minute windows so only the daily cap can trigger
+    results.push(await svc.submitOrder(db, req, ctx({ ip: `7.7.7.${i}`, now: () => Date.now() + i * 11 * 60 * 1000 })).then(() => 'ok', (e) => e.code));
+  }
+  assert.equal(results.filter((r) => r === 'ok').length, 10, JSON.stringify(results));
+  assert.deepEqual(results.slice(10), ['resource-exhausted', 'resource-exhausted']);
+});
+
 test('an order can be deleted completely, together with its email records; nothing else is touched', async () => {
   const { orderId, pid } = await placeOrder();
   await svc.submitOrder(db, orderReq(pid, M_BLACK, 1), ctx({ ip: '4.4.4.4' }));       // a second order that must survive
   assert.equal((await db.collection('orders').get()).size, 2);
+  assert.ok((await db.collection('idempotency').where('orderId', '==', orderId).get()).size === 1);
   const out = await svc.adminDeleteOrder(db, orderId);
   assert.equal(out.deleted, true);
+  assert.equal((await db.collection('idempotency').where('orderId', '==', orderId).get()).size, 0);
   assert.equal((await db.doc(`orders/${orderId}`).get()).exists, false);
   assert.equal((await db.collection('mail').where('orderId', '==', orderId).get()).size, 0);
   assert.equal((await db.collection('orders').get()).size, 1);

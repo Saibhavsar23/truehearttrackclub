@@ -11,7 +11,7 @@ const M = require('./mail');
 const W = require('./webhook');
 
 const { HttpError } = L;
-const RATE = { windowMs: 10 * 60 * 1000, perIp: 10, perEmail: 5 };
+const RATE = { windowMs: 10 * 60 * 1000, perIp: 10, perEmail: 5, dayMs: 24 * 60 * 60 * 1000, perEmailDay: 10 };
 
 const toDate = (ms) => new Date(ms);
 
@@ -196,16 +196,16 @@ async function adminSendTestMail(db, adminEmail, send) {
 }
 /* ---------------------------------- orders --------------------------------- */
 
-async function hit(db, key, limit, now) {
+async function hit(db, key, limit, now, windowMs = RATE.windowMs) {
   const ref = db.collection('rateLimits').doc(key);
   await db.runTransaction(async (tx) => {
     const s = await tx.get(ref);
     const d = s.exists ? s.data() : null;
-    if (d && now - d.windowStartMillis < RATE.windowMs) {
+    if (d && now - d.windowStartMillis < windowMs) {
       if (d.count >= limit) throw new HttpError('resource-exhausted', 'Too many order attempts. Please wait a few minutes and try again.');
       tx.update(ref, { count: d.count + 1 });
     } else {
-      tx.set(ref, { windowStartMillis: now, count: 1, expireAt: toDate(now + 24 * 3600 * 1000) });
+      tx.set(ref, { windowStartMillis: now, count: 1, expireAt: toDate(now + 2 * 24 * 3600 * 1000) });
     }
   });
 }
@@ -225,6 +225,8 @@ async function submitOrder(db, data, ctx) {
   const t0 = now();
   await hit(db, `ip_${L.hashKey(ip)}`, RATE.perIp, t0);
   await hit(db, `em_${L.hashKey(req.customerEmail)}`, RATE.perEmail, t0);
+  // a second, daily cap per address: stops someone from using the shop to flood a victim's inbox with confirmation emails
+  await hit(db, `emd_${L.hashKey(req.customerEmail)}`, RATE.perEmailDay, t0, RATE.dayMs);
 
   const payloadHash = L.hashKey(JSON.stringify([req.customerEmail, req.items.map((i) => [i.productId, i.variantId, i.quantity]).sort()]));
   const idemRef = db.collection('idempotency').doc(L.hashKey(req.idempotencyKey));
@@ -321,6 +323,7 @@ async function adminUpdateOrderStatus(db, uid, orderId, newStatus, now = () => D
     if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
     const o = snap.data();
     if (!L.canTransition(o.status, newStatus)) throw new HttpError('failed-precondition', `An order that is "${o.status}" cannot be changed to "${newStatus}".`);
+    if (newStatus === 'cancelled' && o.paid === true) throw new HttpError('failed-precondition', 'This order is marked paid. Refund the customer, change it to Not paid, then cancel it.');
     const nowMs = now();
     const nowDate = toDate(nowMs);
     const patch = { status: newStatus, updatedAt: nowDate, statusHistory: [...(o.statusHistory || []), { status: newStatus, byUid: uid, atMillis: nowMs }] };
@@ -371,8 +374,10 @@ async function adminDeleteOrder(db, orderId) {
   const snap = await ref.get();
   if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
   const mail = await db.collection('mail').where('orderId', '==', orderId).get();
+  const idem = await db.collection('idempotency').where('orderId', '==', orderId).get();   // so a retry can never "succeed" with an order that no longer exists
   const batch = db.batch();
   mail.docs.forEach((d) => batch.delete(d.ref));
+  idem.docs.forEach((d) => batch.delete(d.ref));
   batch.delete(ref);
   await batch.commit();
   return { deleted: true, orderNumber: snap.data().orderNumber };
