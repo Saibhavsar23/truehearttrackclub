@@ -279,7 +279,7 @@ async function viewOrders() {
     let rows = state.rows;
     if (state.pay === 'paid') rows = rows.filter((o) => o.paid === true);
     if (state.pay === 'unpaid') rows = rows.filter((o) => o.paid !== true && o.status !== 'cancelled');
-    if (q) rows = rows.filter(($1);
+    if (q) rows = rows.filter((o) => [o.orderNumber, o.customerName, o.customerEmail, o.customerPhone].some((x) => String(x || '').toLowerCase().includes(q)));
     clear(list).append(ordersTable(rows, safeOpen));
     more.hidden = state.done;
     if (q && !rows.length && !state.done) list.append(h('p', { class: 'fine' }, 'No match in the orders loaded so far. Load more, or use "Find order number" for an exact order number.'));
