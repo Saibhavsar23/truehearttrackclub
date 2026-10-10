@@ -50,6 +50,21 @@ test('product save writes public variant docs WITHOUT stock counts, and private 
   assert.equal(await stockOf(pid, M_BLACK), 5);
 });
 
+test('editing a product does not overwrite stock that changed while the editor was open; an explicit change still wins', async () => {
+  await openSchedule();
+  const pid = await makeProduct(5);
+  await svc.submitOrder(db, orderReq(pid, M_BLACK, 2), ctx());          // 5 -> 3 while an admin has the editor open (it showed 5)
+  const edit = (stockQuantity, expectedStock) => svc.adminSaveProduct(db, 'adminuid', {
+    id: pid, name: 'Team Hoodie v2', description: '', priceCents: 4500, active: true, images: [],
+    variants: [{ size: 'M', color: 'Black', stockQuantity, expectedStock }, { size: 'L', color: 'Black', stockQuantity: 2, expectedStock: 2 }],
+  });
+  await edit(5, 5);                                                      // admin only renamed it: stock untouched, so keep the live 3
+  assert.equal(await stockOf(pid, M_BLACK), 3);
+  await edit(10, 5);                                                     // admin typed a new count: that wins
+  assert.equal(await stockOf(pid, M_BLACK), 10);
+  assert.equal((await db.doc(`products/${pid}/variants/${M_BLACK}`).get()).data().inStock, true);
+});
+
 test('successful order: authoritative pricing, stock decremented, order + 2 mail jobs + counter committed', async () => {
   await openSchedule();
   const pid = await makeProduct(5);

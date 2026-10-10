@@ -16,6 +16,8 @@ const S = {
   settings: { fulfillmentMethods: [], checkoutNotice: '' },
   notes: new Map(),   // `${productId}/${variantId}` -> message about a cart line
   submitting: false,
+  view: null,         // what the stage shows: 'closed' | 'catalog'
+  draft: {},          // checkout form values, kept while the dialog is closed
 };
 const now = () => Date.now() + S.skew;
 const lineKey = (i) => `${i.productId}/${i.variantId}`;
@@ -24,10 +26,15 @@ const lineKey = (i) => `${i.productId}/${i.variantId}`;
 
 function openDialog(dlg) { if (!dlg.open) dlg.showModal(); document.body.classList.add('lock'); }
 function closeDialog(dlg) { if (dlg.open) dlg.close(); }
+const locked = (dlg) => dlg === coDlg && S.submitting;   // checkout cannot be dismissed while an order is being sent
 for (const dlg of [cartDlg, pdpDlg, coDlg]) {
+  let downOnBackdrop = false;
   dlg.addEventListener('close', () => { if (![cartDlg, pdpDlg, coDlg].some((d) => d.open)) document.body.classList.remove('lock'); });
-  dlg.addEventListener('click', (e) => { if (e.target === dlg) closeDialog(dlg); });          // backdrop click
-  dlg.addEventListener('click', (e) => { if (e.target.closest('[data-close]')) closeDialog(dlg); });
+  dlg.addEventListener('cancel', (e) => { if (locked(dlg)) e.preventDefault(); });              // Escape
+  dlg.addEventListener('pointerdown', (e) => { downOnBackdrop = e.target === dlg; });
+  // backdrop click closes only if the press also began on the backdrop (dragging a text selection out of a field must not close it)
+  dlg.addEventListener('click', (e) => { if (e.target === dlg && downOnBackdrop && !locked(dlg)) closeDialog(dlg); downOnBackdrop = false; });
+  dlg.addEventListener('click', (e) => { if (e.target.closest('[data-close]') && !locked(dlg)) closeDialog(dlg); });
 }
 
 function errMessage(e) {
@@ -137,6 +144,7 @@ function renderError(e, retry) {
 }
 
 function renderClosed() {
+  S.view = 'closed';
   setChip();
   const st = S.status;
   const extra = [];
@@ -169,6 +177,7 @@ function tickCountdown() {
 }
 
 function renderCatalog() {
+  S.view = 'catalog';
   setChip();
   stage.setAttribute('aria-busy', 'false');
   const list = S.catalog;
@@ -309,6 +318,9 @@ function renderCartButton() {
 function renderCart() {
   const body = $('#cart-body'); const foot = $('#cart-foot');
   const cart = Cart.getCart();
+  // re-rendering replaces the controls, so remember which one had focus and restore it (keyboard users would otherwise lose their place)
+  const ae = document.activeElement;
+  const fid = ae && cartDlg.contains(ae) ? ae.dataset.fid : null;
   clear(body); clear(foot);
   if (!cart.items.length) {
     body.append(h('div', { class: 'state', style: 'padding:2.5rem 0' }, h('p', { class: 'lede' }, 'Your cart is empty.'), h('button', { class: 'btn btn--ghost', type: 'button', 'data-close': '' }, 'Continue shopping')));
@@ -317,7 +329,7 @@ function renderCart() {
   for (const it of cart.items) {
     const note = S.notes.get(lineKey(it));
     const id = `qty-${it.productId}-${it.variantId}`;
-    const qty = h('input', { type: 'text', inputmode: 'numeric', id, 'aria-label': `Quantity for ${it.name}`, value: String(it.qty), onchange: (e) => { const n = parseInt(e.target.value, 10); Cart.setQty(it.productId, it.variantId, Number.isFinite(n) ? n : it.qty); } });
+    const qty = h('input', { type: 'text', inputmode: 'numeric', id, 'data-fid': `q:${lineKey(it)}`, 'aria-label': `Quantity for ${it.name}`, value: String(it.qty), onchange: (e) => { const n = parseInt(e.target.value, 10); if (Number.isFinite(n)) Cart.setQty(it.productId, it.variantId, n); else e.target.value = String(it.qty); } });
     body.append(h('div', { class: 'cart-line' },
       h('div', { class: 'cart-line__img' }, it.image ? h('img', { src: it.image, alt: '' }) : h('div', { class: 'noimg' }, '')),
       h('div', {},
@@ -326,9 +338,9 @@ function renderCart() {
         h('p', { class: 'cart-line__meta' }, `${money(it.priceCents)} each`),
         h('div', { class: 'cart-line__row' },
           h('div', { class: 'qty qty--sm' },
-            h('button', { type: 'button', 'aria-label': `Decrease quantity of ${it.name}, ${it.size} ${it.color}`, onclick: () => Cart.setQty(it.productId, it.variantId, it.qty - 1) }, '−'),
+            h('button', { type: 'button', 'data-fid': `d:${lineKey(it)}`, 'aria-label': `Decrease quantity of ${it.name}, ${it.size} ${it.color}`, onclick: () => Cart.setQty(it.productId, it.variantId, it.qty - 1) }, '−'),
             qty,
-            h('button', { type: 'button', 'aria-label': `Increase quantity of ${it.name}, ${it.size} ${it.color}`, disabled: it.qty >= Cart.MAX_LINE_QTY, onclick: () => Cart.setQty(it.productId, it.variantId, it.qty + 1) }, '+')),
+            h('button', { type: 'button', 'data-fid': `i:${lineKey(it)}`, 'aria-label': `Increase quantity of ${it.name}, ${it.size} ${it.color}`, disabled: it.qty >= Cart.MAX_LINE_QTY, onclick: () => Cart.setQty(it.productId, it.variantId, it.qty + 1) }, '+')),
           h('span', { class: 'cart-line__total' }, money(it.qty * it.priceCents))),
         note ? h('p', { class: `alert${note.bad ? ' alert--bad' : ''}`, role: 'status' }, note.text) : null,
         h('button', { class: 'linkbtn', type: 'button', onclick: () => { Cart.removeItem(it.productId, it.variantId); announce(`${it.name} removed from cart.`); } }, `Remove`, h('span', { class: 'sr-only' }, ` ${it.name}, ${it.size} ${it.color}`)),
@@ -340,9 +352,13 @@ function renderCart() {
     h('div', { class: 'totals' }, h('span', {}, 'Subtotal'), h('span', {}, money(Cart.cartSubtotal(cart)))),
     h('p', { class: 'fine' }, 'No payment is collected online. You review everything before submitting.'),
     closed ? h('p', { class: 'alert alert--bad', role: 'alert' }, 'The shop is closed, so orders cannot be submitted right now.') : null,
-    h('button', { class: 'btn btn--primary btn--block', type: 'button', disabled: blocked || closed || !S.catalog, onclick: startCheckout }, 'Review & check out'),
+    h('button', { class: 'btn btn--primary btn--block', type: 'button', disabled: blocked || closed, onclick: startCheckout }, 'Review & check out'),
     h('button', { class: 'btn btn--ghost btn--block', type: 'button', 'data-close': '' }, 'Continue shopping'),
   ].filter(Boolean));
+  if (fid) {
+    const again = [...cartDlg.querySelectorAll('[data-fid]')].find((n) => n.dataset.fid === fid && !n.disabled);
+    (again || cartDlg.querySelector('.cart-line button, .cart-foot .btn'))?.focus();
+  }
 }
 
 function openCart() { renderCart(); openDialog(cartDlg); }
@@ -366,7 +382,7 @@ async function startCheckout() {
   openDialog(coDlg);
 }
 
-function renderCheckout(prefill = {}) {
+function renderCheckout(prefill = S.draft) {
   const cart = Cart.getCart();
   const methods = (S.settings.fulfillmentMethods || []).filter((m) => m.enabled !== false);
   const f = { name: prefill.name || '', email: prefill.email || '', phone: prefill.phone || '', method: prefill.method || (methods[0] && methods[0].id) || '', details: prefill.details || '' };
@@ -434,6 +450,11 @@ function renderCheckout(prefill = {}) {
     return errors;
   }
 
+  // keep what was typed if the dialog is closed (back to cart, Escape, shop closing) so nothing has to be retyped
+  const saveDraft = () => { S.draft = { name: name.value, email: email.value, phone: phone.value, details: details.value, method: (methodInputs.find((r) => r.checked) || {}).value }; };
+  form.addEventListener('input', saveDraft); form.addEventListener('change', saveDraft);
+  submit.addEventListener('click', saveDraft);
+
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (S.submitting) return;
@@ -446,8 +467,8 @@ function renderCheckout(prefill = {}) {
       return;
     }
     summary.hidden = true;
-    S.submitting = true; submit.setAttribute('aria-busy', 'true'); submit.setAttribute('aria-disabled', 'true');
-    const items = cart.items.map((i) => ({ productId: i.productId, variantId: i.variantId, quantity: i.qty }));
+    S.submitting = true; submit.setAttribute('aria-busy', 'true'); submit.setAttribute('aria-disabled', 'true'); submit.textContent = 'Submitting…';
+    const items = Cart.getCart().items.map((i) => ({ productId: i.productId, variantId: i.variantId, quantity: i.qty }));
     try {
       const res = await callable('submitOrder', {
         idempotencyKey: Cart.checkoutKey(), confirm: true,
@@ -456,13 +477,14 @@ function renderCheckout(prefill = {}) {
         items,
       });
       Cart.clearCart();               // only after the order is safely stored
+      S.draft = {};
       try { sessionStorage.setItem('thtc_last_order', JSON.stringify(res)); } catch (_) {}
       closeDialog(coDlg);
       showConfirmation(res);
     } catch (ex) {
       handleSubmitError(ex, serverErr, { name: name.value, email: email.value, phone: phone.value, details: details.value, method: (methodInputs.find((r) => r.checked) || {}).value });
     } finally {
-      S.submitting = false; submit.removeAttribute('aria-busy'); submit.removeAttribute('aria-disabled');
+      S.submitting = false; submit.removeAttribute('aria-busy'); submit.removeAttribute('aria-disabled'); submit.textContent = 'Submit order (no payment)';
     }
   });
 
@@ -499,7 +521,11 @@ function handleSubmitError(ex, box, keep) {
     loadCatalog().then(() => { if (cartDlg.open) renderCart(); }).catch(() => {});
     return;
   }
-  show(`${errMessage(ex)} Your order was NOT submitted.`.replace('Your cart is saved. Your order was NOT submitted.', 'Your cart is saved and your order was not submitted.'));
+  if (['unavailable', 'deadline-exceeded', 'internal', 'unknown'].includes(code) || /network|fetch/i.test(String(ex.message))) {
+    show('We could not confirm that your order went through. Your cart is saved. It is safe to press Submit again: the same order is never created twice.');
+    return;
+  }
+  show(`${errMessage(ex)} Your order was NOT submitted.`);
 }
 
 /* ------------------------------------------------------------------ confirmation */
@@ -572,12 +598,14 @@ async function refresh() {
     const wasOpen = S.status && S.status.open;
     await loadStatus();
     if (S.status.open && (!wasOpen || !S.catalog)) await loadCatalog();
-    if (wasOpen !== S.status.open) {
-      if (!S.status.open) { closeDialog(pdpDlg); closeDialog(coDlg); announce('The shop has closed.'); }
-      showStage();
-    } else setChip();
-  } catch (_) { /* keep showing what we have */ }
-  refreshing = false;
+    if (wasOpen && !S.status.open) {
+      closeDialog(pdpDlg); closeDialog(coDlg);
+      toast('The shop has closed. Your cart is saved.');
+    }
+    const want = S.status.open ? (S.catalog ? 'catalog' : null) : 'closed';
+    if (want && want !== S.view) showStage(); else setChip();
+  } catch (_) { /* keep showing what we have; the next tick retries */ }
+  finally { refreshing = false; }
 }
 
 init();

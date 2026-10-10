@@ -23,6 +23,7 @@ function fail(e) {
   console.error(e);
 }
 async function guarded(btn, fn) {
+  if (btn.getAttribute('aria-busy') === 'true') return;   // ignore double clicks while the first is still running
   btn.setAttribute('aria-busy', 'true'); btn.setAttribute('aria-disabled', 'true');
   try { return await fn(); } catch (e) { fail(e); } finally { btn.removeAttribute('aria-busy'); btn.removeAttribute('aria-disabled'); }
 }
@@ -38,7 +39,9 @@ async function boot() {
   F.au.onAuthStateChanged(F.auth, async (u) => {
     user = u;
     if (!u) return renderLogin();
-    const tok = await u.getIdTokenResult(true); // force refresh so a newly granted claim is picked up
+    let tok;
+    try { tok = await u.getIdTokenResult(true); } // force refresh so a newly granted claim is picked up
+    catch (e) { clear(app).append(h('div', { class: 'login' }, h('h1', {}, 'Admin'), h('p', { class: 'notice notice--error', role: 'alert' }, 'Could not verify your account. Check your connection and reload. ' + (e.message || '')), h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => location.reload() }, 'Reload'))); return; }
     if (tok.claims.admin !== true) return renderDenied();
     renderShell();
   });
@@ -57,7 +60,13 @@ function renderLogin(message) {
     });
   } },
   h('div', { class: 'field' }, h('label', { for: 'l-email' }, 'Email'), email),
-  h('div', { class: 'field' }, h('label', { for: 'l-pass' }, 'Password'), pass), err, btn);
+  h('div', { class: 'field' }, h('label', { for: 'l-pass' }, 'Password'), pass), err, btn,
+  h('button', { class: 'linkbtn', type: 'button', style: 'margin-top:.8rem', onclick: async () => {
+    err.textContent = '';
+    if (!email.value.trim()) { err.textContent = 'Type your email above first, then press Forgot password.'; email.focus(); return; }
+    try { await F.au.sendPasswordResetEmail(F.auth, email.value.trim()); } catch (_) { /* do not reveal whether the account exists */ }
+    toast('If that account exists, a password reset email is on its way.');
+  } }, 'Forgot password?'));
   clear(app).append(h('div', { class: 'login' }, h('h1', {}, 'Admin sign-in'), h('p', { class: 'fine', style: 'margin-bottom:1.2rem' }, 'True Heart store dashboard. Administrator accounts are created by the site owner.'), form));
   email.focus();
 }
@@ -91,10 +100,12 @@ function renderShell() {
 function go(id, focus, initial) {
   tab = id;
   $$tabs().forEach((b) => { const on = b.id === `tab-${id}`; b.setAttribute('aria-selected', String(on)); b.tabIndex = on ? 0 : -1; if (on && focus) b.focus(); });
-  panel.setAttribute('aria-labelledby', `tab-${id}`);
-  clear(panel).append(h('p', { class: 'empty' }, 'Loading...'));
+  // each navigation gets a fresh panel: a slow view that finishes late writes into a detached node instead of the current tab
+  const fresh = h('div', { id: 'panel', role: 'tabpanel', 'aria-labelledby': `tab-${id}` }, h('p', { class: 'empty' }, 'Loading...'));
+  panel.replaceWith(fresh); panel = fresh;
+  const mine = panel;
   const view = { overview: viewOverview, orders: viewOrders, products: viewProducts, schedules: viewSchedules, settings: viewSettings }[id];
-  view().catch((e) => { clear(panel).append(h('div', { class: 'notice notice--error', role: 'alert' }, 'Could not load this section: ' + e.message)); console.error(e); });
+  view().catch((e) => { clear(mine).append(h('div', { class: 'notice notice--error', role: 'alert' }, 'Could not load this section: ' + e.message)); console.error(e); });
 }
 const $$tabs = () => [...document.querySelectorAll('.tabs [role=tab]')];
 
@@ -123,7 +134,7 @@ const stockKey = (pid, vid) => `${pid}__${vid}`;
 /* ============================== overview ============================== */
 
 async function viewOverview() {
-  const { db, fs } = F;
+  const { db, fs } = F; const out = panel;
   const [status, products, inv, recent, awaiting, scheds] = await Promise.all([
     callable('getStoreStatus', {}), loadProducts(true), loadInventory(true),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(8))),
@@ -140,7 +151,7 @@ async function viewOverview() {
   const unsent = (await fs.getDocs(fs.query(fs.collection(db, 'mail'), fs.where('status', '==', 'failed'), fs.limit(20)))).size;
   const next = status.nextOpensAtMillis;
 
-  clear(panel).append(
+  clear(out).append(
     h('div', { class: 'cards' },
       h('div', { class: 'card2' }, h('h3', {}, 'Store status'), h('p', { class: 'big' }, status.open ? 'Open' : 'Closed'), h('p', { class: 'fine', style: 'margin-top:.5rem' }, status.open ? `Closes ${fmtNY(status.closesAtMillis)}` : (next ? `Opens ${fmtNY(next, { year: true })}` : 'No upcoming schedule'))),
       h('div', { class: 'card2' }, h('h3', {}, 'Orders awaiting action'), h('p', { class: 'big' }, String(awaiting.size)), h('p', { class: 'fine', style: 'margin-top:.5rem' }, 'Status: submitted')),
@@ -171,14 +182,14 @@ function ordersTable(orders, onOpen) {
 }
 
 async function viewOrders() {
-  const { db, fs } = F;
+  const { db, fs } = F; const out = panel;
   const state = { status: '', q: '', rows: [], last: null, done: false };
   const list = h('div', {});
   const more = h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => fetchPage(true) }, 'Load more');
   const statusSel = h('select', { id: 'o-status', onchange: () => { state.status = statusSel.value; reset(); } },
     h('option', { value: '' }, 'All statuses'), ...Object.keys(STATUS_LABEL).map((s) => h('option', { value: s }, STATUS_LABEL[s])));
   const search = h('input', { type: 'text', id: 'o-q', placeholder: 'Order number, name or email', 'aria-describedby': 'o-help', oninput: () => { state.q = search.value.trim(); draw(); } });
-  const find = h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: findExact }, 'Find order number');
+  const find = h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => findExact().catch(fail) }, 'Find order number');
 
   async function fetchPage(append) {
     const cons = [];
@@ -196,7 +207,7 @@ async function viewOrders() {
   function draw() {
     const q = state.q.toLowerCase();
     const rows = q ? state.rows.filter((o) => [o.orderNumber, o.customerName, o.customerEmail, o.customerPhone].some((x) => String(x || '').toLowerCase().includes(q))) : state.rows;
-    clear(list).append(ordersTable(rows, openOrder));
+    clear(list).append(ordersTable(rows, safeOpen));
     more.hidden = state.done;
     if (q && !rows.length && !state.done) list.append(h('p', { class: 'fine' }, 'No match in the orders loaded so far. Load more, or use "Find order number" for an exact order number.'));
   }
@@ -205,10 +216,10 @@ async function viewOrders() {
     if (!/^THTC-\d{3,}$/.test(n)) { toast('Type a full order number such as THTC-00012.'); return; }
     const snap = await fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.where('orderNumber', '==', n), fs.limit(1)));
     if (snap.empty) { toast('No order with that number.'); return; }
-    openOrder(snapOrder(snap.docs[0]));
+    safeOpen(snapOrder(snap.docs[0]));
   }
 
-  clear(panel).append(
+  clear(out).append(
     h('div', { class: 'toolbar' }, h('div', { class: 'field' }, h('label', { for: 'o-status' }, 'Status'), statusSel), h('div', { class: 'field', style: 'flex:1 1 260px' }, h('label', { for: 'o-q' }, 'Search'), search), find),
     h('p', { class: 'fine', id: 'o-help', style: 'margin-bottom:1rem' }, 'Search filters the orders loaded below. Payment is never collected online: every order is unpaid until you arrange it with the customer.'),
     h('section', { class: 'panel' }, list, h('div', { style: 'margin-top:1rem' }, more)));
@@ -216,15 +227,19 @@ async function viewOrders() {
   if (location.hash.startsWith('#order=')) {
     const id = location.hash.slice(7);
     const snap = await fs.getDoc(fs.doc(db, 'orders', id)).catch(() => null);
-    if (snap && snap.exists()) openOrder(snapOrder(snap));
+    if (snap && snap.exists()) safeOpen(snapOrder(snap));
   }
 }
+
+let ordersDirty = false;     // set when an order changed, so the lists behind the dialog are refreshed when it closes
+const safeOpen = (o) => openOrder(o).catch(fail);
 
 async function openOrder(o) {
   const { db, fs } = F;
   history.replaceState(null, '', `#order=${o.id}`);
   const mailSnap = await fs.getDocs(fs.query(fs.collection(db, 'mail'), fs.where('orderId', '==', o.id))).catch(() => ({ docs: [] }));
   const fresh = await fs.getDoc(fs.doc(db, 'orders', o.id));
+  if (!fresh.exists()) throw new Error('That order no longer exists.');
   o = snapOrder(fresh);
   const mails = mailSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => (ms(a.createdAt) || 0) - (ms(b.createdAt) || 0));
   const actions = h('div', { class: 'row-actions' });
@@ -233,7 +248,7 @@ async function openOrder(o) {
     btn.onclick = () => {
       const msg = next === 'cancelled' ? `Cancel ${o.orderNumber}? Stock is returned to inventory and the customer is emailed. This cannot be undone.` : `Mark ${o.orderNumber} as ${STATUS_LABEL[next].toLowerCase()}? The customer will be emailed.`;
       if (!confirm(msg)) return;
-      guarded(btn, async () => { await callable('adminUpdateOrderStatus', { orderId: o.id, status: next }); toast(`${o.orderNumber}: ${STATUS_LABEL[next]}`); await openOrder(o); });
+      guarded(btn, async () => { await callable('adminUpdateOrderStatus', { orderId: o.id, status: next }); ordersDirty = true; toast(`${o.orderNumber}: ${STATUS_LABEL[next]}`); await openOrder(o); });
     };
     actions.append(btn);
   }
@@ -255,9 +270,12 @@ async function openOrder(o) {
       h('div', {}, h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'History'), h('ul', {}, (o.statusHistory || []).map((x) => h('li', { class: 'fine' }, `${fmtNY(x.atMillis)}: ${STATUS_LABEL[x.status] || x.status}`)))),
       h('div', {}, h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'Emails'),
         mails.length ? h('ul', {}, mails.map((m) => h('li', { class: 'fine', style: 'display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;padding:.3rem 0' }, tag(m.status === 'sent' ? 'sent' : m.status === 'failed' ? 'failed' : 'pending', m.status === 'sent' ? 'sent to Make' : m.status), `${m.kind.replace(/_/g, ' ')} → ${m.to}`, m.attempts ? `(attempts: ${m.attempts})` : '', m.lastError && m.status !== 'sent' ? h('span', { class: 'alert' }, m.lastError) : null,
-          m.status === 'failed' ? h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: (e) => guarded(e.currentTarget, async () => { await callable('adminResendMail', { mailId: m.id }); toast('Email re-queued'); openOrder(o); }) }, 'Retry') : null))) : h('p', { class: 'fine' }, 'No email records.'))),
+          m.status === 'failed' ? h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: (e) => guarded(e.currentTarget, async () => { await callable('adminResendMail', { mailId: m.id }); ordersDirty = true; toast('Email re-queued'); await openOrder(o); }) }, 'Retry') : null))) : h('p', { class: 'fine' }, 'No email records.'))),
   );
-  dlg.addEventListener('close', () => { history.replaceState(null, '', location.pathname); }, { once: true });
+  dlg.addEventListener('close', () => {
+    history.replaceState(null, '', location.pathname);
+    if (ordersDirty) { ordersDirty = false; if (tab === 'orders' || tab === 'overview') go(tab); }
+  }, { once: true });
   if (!dlg.open) dlg.showModal();
 }
 
@@ -265,7 +283,10 @@ function ensureDialog(id) {
   let d = document.getElementById(id);
   if (!d) {
     d = h('dialog', { id, class: 'sheet', 'aria-labelledby': `${id}-t` });
-    d.addEventListener('click', (e) => { if (e.target === d) d.close(); });
+    // only the read-only order view closes on a backdrop click; editors must not lose unsaved work to a stray click
+    let down = false;
+    d.addEventListener('pointerdown', (e) => { down = e.target === d; });
+    d.addEventListener('click', (e) => { if (e.target === d && down && id === 'order-dlg') d.close(); down = false; });
     document.body.append(d);
   }
   return d;
@@ -274,8 +295,9 @@ function ensureDialog(id) {
 /* ============================== products ============================== */
 
 async function viewProducts() {
+  const out = panel;
   const [products, inv] = await Promise.all([loadProducts(true), loadInventory(true)]);
-  clear(panel).append(
+  clear(out).append(
     h('div', { class: 'toolbar' }, h('button', { class: 'btn btn--primary btn--sm', type: 'button', onclick: () => editProduct(null) }, 'New product')),
     h('section', { class: 'panel' }, h('h2', {}, 'Products'),
       products.length ? h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Product', 'Price', 'Variants', 'Units left', 'Status', ''].map((x) => h('th', { scope: 'col' }, x)))),
@@ -310,7 +332,7 @@ function editProduct(existing) {
     name: existing ? existing.name : '', description: existing ? existing.description || '' : '',
     price: existing ? (existing.priceCents / 100).toFixed(2) : '', active: existing ? existing.active : false, featured: existing ? existing.featured === true : false,
     images: existing ? (existing.images || []).map((x) => ({ ...x })) : [],
-    variants: existing ? existing.variants.filter((v) => v.active).map((v) => ({ size: v.size, color: v.color, sku: v.sku || '', stock: inv.get(stockKey(id, v.id)) ?? 0, active: v.active })) : [],
+    variants: existing ? existing.variants.filter((v) => v.active).map((v) => ({ size: v.size, color: v.color, sku: v.sku || '', stock: inv.get(stockKey(id, v.id)) ?? 0, orig: inv.get(stockKey(id, v.id)) ?? 0, active: v.active })) : [],
   };
   const dlg = ensureDialog('product-dlg');
   const err = h('div', { class: 'errsum', role: 'alert', tabindex: '-1', hidden: true });
@@ -345,8 +367,10 @@ function editProduct(existing) {
       h('td', {}, h('button', { class: 'linkbtn', type: 'button', onclick: () => { m.variants.splice(i, 1); drawVariants(); } }, 'Remove', h('span', { class: 'sr-only' }, ` row ${i + 1}`))))));
     if (!m.variants.length) vBox.append(h('tr', {}, h('td', { colspan: 5, class: 'fine' }, 'No variants yet. Add a row, or generate sizes × colors below.')));
   };
+  let uploading = 0;
   const upload = h('input', { type: 'file', id: 'p-file', accept: 'image/jpeg,image/png,image/webp,image/avif', multiple: true, onchange: async (e) => {
     for (const f of [...e.target.files]) {
+      uploading++;
       try {
         toast(`Uploading ${f.name}...`);
         const blob = await resizeImage(f);
@@ -356,6 +380,7 @@ function editProduct(existing) {
         m.images.push({ url: await st.getDownloadURL(r), path, alt: '' });
         drawImages();
       } catch (ex) { fail(ex); }
+      finally { uploading--; }
     }
     e.target.value = '';
   } });
@@ -367,10 +392,17 @@ function editProduct(existing) {
     const priceCents = Math.round(dollars * 100);
     const problems = [];
     if (!name.value.trim()) problems.push('Name is required.');
-    if (!Number.isFinite(dollars) || dollars < 0 || Math.abs(dollars * 100 - priceCents) > 1e-6) problems.push('Price must be a dollar amount with at most 2 decimals, e.g. 45.00.');
+    if (uploading) problems.push('A photo is still uploading. Wait a moment and save again.');
+    if (!String(price.value).trim() || !Number.isFinite(dollars) || dollars < 0 || Math.abs(dollars * 100 - priceCents) > 1e-6) problems.push('Price must be a dollar amount with at most 2 decimals, e.g. 45.00.');
     for (const [i, v] of m.variants.entries()) {
       if (!String(v.size).trim() || !String(v.color).trim()) problems.push(`Variant row ${i + 1}: size and color are required.`);
       if (!Number.isInteger(v.stock) || v.stock < 0) problems.push(`Variant row ${i + 1}: stock must be a whole number, 0 or more.`);
+    }
+    const seen = new Set();
+    for (const [i, v] of m.variants.entries()) {
+      const k = `${String(v.size).trim().toLowerCase()}|${String(v.color).trim().toLowerCase()}`;
+      if (String(v.size).trim() && String(v.color).trim() && seen.has(k)) problems.push(`Variant row ${i + 1}: ${v.size} / ${v.color} appears more than once.`);
+      seen.add(k);
     }
     if (active.checked && !m.variants.length) problems.push('Add at least one variant before activating the product.');
     if (problems.length) { err.hidden = false; clear(err).append(h('strong', {}, 'Please fix:'), h('ul', {}, problems.map((x) => h('li', {}, x)))); err.focus(); return; }
@@ -378,7 +410,7 @@ function editProduct(existing) {
       await callable('adminSaveProduct', {
         id, name: name.value.trim(), description: desc.value.trim(), priceCents, active: active.checked, featured: featured.checked,
         images: m.images.map((x) => ({ url: x.url, path: x.path, alt: x.alt || '' })),
-        variants: m.variants.map((v) => ({ size: String(v.size).trim(), color: String(v.color).trim(), sku: String(v.sku || '').trim(), stockQuantity: v.stock, active: true })),
+        variants: m.variants.map((v) => ({ size: String(v.size).trim(), color: String(v.color).trim(), sku: String(v.sku || '').trim(), stockQuantity: v.stock, expectedStock: Number.isInteger(v.orig) ? v.orig : undefined, active: true })),
       });
     } catch (ex) { err.hidden = false; err.textContent = ex.message; err.focus(); return; }
     toast('Product saved');
@@ -418,13 +450,13 @@ function editProduct(existing) {
 /* ============================== schedules ============================== */
 
 async function viewSchedules() {
-  const { db, fs } = F;
+  const { db, fs } = F; const out = panel;
   const [status, snap] = await Promise.all([callable('getStoreStatus', {}), fs.getDocs(fs.query(fs.collection(db, 'storeSchedules'), fs.orderBy('opensAt', 'desc')))]);
   const rows = snap.docs.map((d) => ({ id: d.id, ...d.data(), opens: ms(d.data().opensAt), closes: ms(d.data().closesAt) }));
   const nowMs = status.serverNowMillis;
   const stateOf = (s) => !s.active ? ['inactive', 'Inactive'] : (s.opens <= nowMs && nowMs < s.closes ? ['open', 'Open now'] : (s.opens > nowMs ? ['upcoming', 'Upcoming'] : ['ended', 'Ended']));
 
-  clear(panel).append(
+  clear(out).append(
     h('div', { class: 'cards' }, h('div', { class: 'card2' }, h('h3', {}, 'Right now'), h('p', { class: 'big' }, status.open ? 'Open' : 'Closed'), h('p', { class: 'fine', style: 'margin-top:.5rem' }, status.open ? `Closes ${fmtNY(status.closesAtMillis)}` : (status.nextOpensAtMillis ? `Next opening ${fmtNY(status.nextOpensAtMillis, { year: true })}` : 'No upcoming schedule. The shop stays closed.')))),
     h('p', { class: 'notice', style: 'margin-bottom:1rem' }, h('strong', {}, 'All times are New York time (Eastern, daylight-saving aware).'), ' The shop is open when opening time ≤ now < closing time. Active schedules cannot overlap. Changes apply immediately; no redeploy needed.'),
     h('div', { class: 'toolbar' }, h('button', { class: 'btn btn--primary btn--sm', type: 'button', onclick: () => editSchedule(null) }, 'New schedule')),
@@ -463,7 +495,7 @@ function editSchedule(s) {
 /* ============================== settings ============================== */
 
 async function viewSettings() {
-  const { db, fs } = F;
+  const { db, fs } = F; const out = panel;
   const [snap, mailCfg] = await Promise.all([fs.getDoc(fs.doc(db, 'settings', 'public')), callable('adminGetMailConfig', {})]);
   const cur = snap.exists() ? snap.data() : { fulfillmentMethods: [], checkoutNotice: '' };
   const methods = (cur.fulfillmentMethods || []).map((x) => ({ ...x }));
@@ -480,8 +512,10 @@ async function viewSettings() {
       h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => { methods.splice(i, 1); draw(); } }, 'Remove'))));
   };
   const save = h('button', { class: 'btn btn--primary', type: 'button' }, 'Save settings');
-  save.onclick = () => guarded(save, async () => { await callable('adminSaveSettings', { fulfillmentMethods: methods, checkoutNotice: notice.value.trim() }); toast('Settings saved'); });
-  clear(panel).append(
+  save.onclick = () => guarded(save, async () => {
+    for (const m of methods) if (!m.id && m.label) m.id = m.label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40);
+    await callable('adminSaveSettings', { fulfillmentMethods: methods, checkoutNotice: notice.value.trim() }); toast('Settings saved'); });
+  clear(out).append(
     h('section', { class: 'panel' }, h('h2', {}, 'Fulfillment options'),
       h('p', { class: 'fine', style: 'margin-bottom:1rem' }, 'Fulfillment is undecided, so none are required. Add options (e.g. local pickup, shipping) when you decide; nothing is invented for you. Do not add prices here: this store does not calculate shipping.'),
       box, h('button', { class: 'btn btn--ghost btn--sm', type: 'button', style: 'margin-top:.8rem', onclick: () => { methods.push({ id: '', label: '', requiresDetails: false, detailsLabel: '', enabled: true }); draw(); } }, 'Add option'),

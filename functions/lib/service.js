@@ -131,8 +131,8 @@ async function adminSaveProduct(db, uid, raw) {
   if (p.active && p.variants.filter((v) => v.active).length === 0) throw new HttpError('invalid-argument', 'Add at least one active size/color variant before activating a product.');
 
   return db.runTransaction(async (tx) => {
-    const [psnap, vsnap] = await Promise.all([tx.get(pref), tx.get(pref.collection('variants'))]);
     const invRefs = p.variants.map((v) => db.collection('inventory').doc(invId(id, v.id)));
+    const [psnap, vsnap, invSnaps] = await Promise.all([tx.get(pref), tx.get(pref.collection('variants')), invRefs.length ? tx.getAll(...invRefs) : Promise.resolve([])]);
     const now = FieldValue.serverTimestamp();
     const newIds = new Set(p.variants.map((v) => v.id));
     tx.set(pref, {
@@ -151,11 +151,14 @@ async function adminSaveProduct(db, uid, raw) {
     p.variants.forEach((v, i) => {
       const vref = pref.collection('variants').doc(v.id);
       const prev = vsnap.docs.find((d) => d.id === v.id);
+      // If the admin did not change this count since opening the editor, keep the live count (orders may have been placed meanwhile).
+      const cur = invSnaps[i].exists ? invSnaps[i].data().stockQuantity : null;
+      const stock = (v.expectedStock !== null && cur !== null && v.stockQuantity === v.expectedStock) ? cur : v.stockQuantity;
       tx.set(vref, {
-        sku: v.sku, size: v.size, color: v.color, active: v.active, inStock: v.active && v.stockQuantity > 0,
+        sku: v.sku, size: v.size, color: v.color, active: v.active, inStock: v.active && stock > 0,
         createdAt: prev ? prev.data().createdAt : now, updatedAt: now,
       });
-      tx.set(invRefs[i], { productId: id, variantId: v.id, stockQuantity: v.stockQuantity, updatedAt: now });
+      tx.set(invRefs[i], { productId: id, variantId: v.id, stockQuantity: stock, updatedAt: now });
     });
     // Variants removed in the editor are retired (kept for history) rather than deleted.
     for (const d of vsnap.docs) {

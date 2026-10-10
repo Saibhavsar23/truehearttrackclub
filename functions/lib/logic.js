@@ -188,7 +188,8 @@ function validateProductInput(data) {
     seen.add(id);
     if (!Number.isInteger(v.stockQuantity) || v.stockQuantity < 0 || v.stockQuantity > 100000) throw new HttpError('invalid-argument', `Stock for ${size} / ${color} must be a whole number of 0 or more.`);
     const sku = cleanText(v.sku, 60, 'SKU');
-    variants.push({ id, size, color, sku: sku || null, stockQuantity: v.stockQuantity, active: v.active !== false });
+    // expectedStock = the count the admin saw when opening the editor; lets the server keep orders that arrived meanwhile
+    variants.push({ id, size, color, sku: sku || null, stockQuantity: v.stockQuantity, expectedStock: Number.isInteger(v.expectedStock) ? v.expectedStock : null, active: v.active !== false });
   }
   return { name, description, priceCents: data.priceCents, images, variants, active: data.active === true, featured: data.featured === true };
 }

@@ -22,7 +22,7 @@ let adminPromise;
 /** Firebase app + Firestore + callable Functions (everything the public storefront needs). */
 export function loadCore() {
   if (!isConfigured) return Promise.reject(Object.assign(new Error('not_configured'), { code: 'not_configured' }));
-  corePromise ??= (async () => {
+  corePromise ??= (async () => {   // reset on failure so "Try again" can recover from a transient network error
     const [{ initializeApp, getApps }, fs, fn] = await Promise.all([
       import(`${SDK}/firebase-app.js`),
       import(`${SDK}/firebase-firestore.js`),
@@ -43,7 +43,7 @@ export function loadCore() {
       fn.connectFunctionsEmulator(functions, '127.0.0.1', 5001);
     }
     return { app, db, functions, fs, fn };
-  })();
+  })().catch((e) => { corePromise = undefined; throw e; });
   return corePromise;
 }
 
@@ -59,7 +59,7 @@ export function loadAdmin() {
       st.connectStorageEmulator(storage, '127.0.0.1', 9199);
     }
     return { ...core, auth, storage, au, st };
-  })();
+  })().catch((e) => { adminPromise = undefined; throw e; });
   return adminPromise;
 }
 
