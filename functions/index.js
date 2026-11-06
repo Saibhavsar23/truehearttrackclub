@@ -56,12 +56,12 @@ async function requireAdmin(request) {
 
 // ----------------------------------- public -----------------------------------
 
-exports.getStoreStatus = onCall(base, wrap(async (request) => {
+exports.getStoreStatus = onCall({ ...base, minInstances: 1 }, wrap(async (request) => {
   checkAppCheck(request);
   return svc.getStoreStatus(db);
 }));
 
-exports.submitOrder = onCall(base, wrap(async (request) => {
+exports.submitOrder = onCall({ ...base, minInstances: 1 }, wrap(async (request) => {
   checkAppCheck(request);
   // x-forwarded-for can contain client-supplied entries at the front; Google's proxy appends the real address LAST.
   const xff = request.rawRequest && request.rawRequest.headers['x-forwarded-for'];

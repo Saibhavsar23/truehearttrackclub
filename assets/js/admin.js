@@ -119,8 +119,10 @@ async function loadProducts(force) {
   const { db, fs } = F;
   const snap = await fs.getDocs(fs.collection(db, 'products'));
   cache.products = await Promise.all(snap.docs.map(async (d) => {
+    const data = d.data();
+    if (Array.isArray(data.variants)) return { id: d.id, ...data, variants: data.variants.map((v) => ({ ...v, active: true })) };
     const vs = await fs.getDocs(fs.collection(db, 'products', d.id, 'variants'));
-    return { id: d.id, ...d.data(), variants: vs.docs.map((v) => ({ id: v.id, ...v.data() })) };
+    return { id: d.id, ...data, variants: vs.docs.map((v) => ({ id: v.id, ...v.data() })) };
   }));
   cache.products.sort((a, b) => (ms(b.createdAt) || 0) - (ms(a.createdAt) || 0));
   return cache.products;
@@ -128,15 +130,26 @@ async function loadProducts(force) {
 
 /* ============================== overview ============================== */
 
+/** Open/closed as the admin dashboard shows it, worked out here from the schedules an admin can read (saves waiting on a server function). */
+function localStatus(rows) {
+  const t = Date.now();
+  const act = rows.filter((s) => s.active === true && s.opens != null && s.closes != null);
+  const cur = act.find((s) => s.opens <= t && t < s.closes);
+  const nxt = act.filter((s) => s.opens > t).sort((a, b) => a.opens - b.opens)[0];
+  return { open: !!cur, closesAtMillis: cur ? cur.closes : null, nextOpensAtMillis: cur ? null : (nxt ? nxt.opens : null), serverNowMillis: t };
+}
+
 async function viewOverview() {
   const { db, fs } = F; const out = panel;
-  const [status, products, recent, scheds, all, failedSnap] = await Promise.all([
-    callable('getStoreStatus', {}), loadProducts(true),
+  const [products, recent, scheds, all, failedSnap] = await Promise.all([
+    loadProducts(true),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(8))),
     fs.getDocs(fs.collection(db, 'storeSchedules')),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(1000))),
     fs.getDocs(fs.query(fs.collection(db, 'mail'), fs.where('status', '==', 'failed'), fs.limit(20))),
   ]);
+
+  const status = localStatus(scheds.docs.map((d) => ({ active: d.data().active === true, opens: ms(d.data().opensAt), closes: ms(d.data().closesAt) })));
 
   // ---- numbers (every order that is not cancelled counts as a sale; "paid" is what you recorded by hand) ----
   const orders = all.docs.map(snapOrder);
@@ -412,7 +425,7 @@ async function viewProducts() {
         })))) : h('p', { class: 'empty' }, 'No products yet. Add your first product; nothing appears on the shop until it is active and the store is open.')));
 }
 
-function resizeImage(file, max = 1600) {
+function resizeImage(file, max = 1600, quality = 0.86) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -421,7 +434,7 @@ function resizeImage(file, max = 1600) {
       const c = document.createElement('canvas'); c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
       c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
       URL.revokeObjectURL(url);
-      c.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not process image'))), 'image/webp', 0.86);
+      c.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not process image'))), 'image/webp', quality);
     };
     img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That file is not a readable image.')); };
     img.src = url;
@@ -453,7 +466,7 @@ function editProduct(existing) {
     clear(imgBox);
     if (!m.images.length) imgBox.append(h('p', { class: 'fine' }, 'No photos yet. The first photo is the main image.'));
     m.images.forEach((im, i) => imgBox.append(h('div', { class: 'imgrow' },
-      h('img', { src: im.url, alt: '' }),
+      h('img', { src: im.thumbUrl || im.url, alt: '' }),
       h('div', { class: 'field' }, h('label', { for: `alt-${i}` }, `Photo ${i + 1} description (for screen readers)`), h('input', { type: 'text', id: `alt-${i}`, value: im.alt || '', maxlength: 200, oninput: (e) => { im.alt = e.target.value; } })),
       h('div', { class: 'row-actions' },
         h('button', { class: 'btn btn--ghost btn--sm', type: 'button', disabled: i === 0, 'aria-label': `Move photo ${i + 1} earlier`, onclick: () => { m.images.splice(i - 1, 0, m.images.splice(i, 1)[0]); drawImages(); } }, '↑'),
@@ -476,10 +489,14 @@ function editProduct(existing) {
       try {
         toast(`Uploading ${f.name}...`);
         const blob = await resizeImage(f);
+        const thumbBlob = await resizeImage(f, 640, 0.8);          // small copy for the shop grid and cart: much faster to load
         const path = `products/${id}/${Date.now()}-${f.name.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '-').slice(0, 50) || 'photo'}.webp`;
         const r = st.ref(storage, path);
         await st.uploadBytes(r, blob, { contentType: 'image/webp' });
-        m.images.push({ url: await st.getDownloadURL(r), path, alt: '' });
+        const thumbPath = path.replace(/\.webp$/, '-t.webp');
+        const tr = st.ref(storage, thumbPath);
+        await st.uploadBytes(tr, thumbBlob, { contentType: 'image/webp' });
+        m.images.push({ url: await st.getDownloadURL(r), path, thumbUrl: await st.getDownloadURL(tr), thumbPath, alt: '' });
         drawImages();
       } catch (ex) { fail(ex); }
       finally { uploading--; }
@@ -510,7 +527,7 @@ function editProduct(existing) {
     try {
       await callable('adminSaveProduct', {
         id, name: name.value.trim(), description: desc.value.trim(), priceCents, active: active.checked, featured: featured.checked,
-        images: m.images.map((x) => ({ url: x.url, path: x.path, alt: x.alt || '' })),
+        images: m.images.map((x) => ({ url: x.url, path: x.path, alt: x.alt || '', ...(x.thumbUrl ? { thumbUrl: x.thumbUrl, thumbPath: x.thumbPath } : {}) })),
         variants: m.variants.map((v) => ({ size: String(v.size).trim(), color: String(v.color).trim(), sku: String(v.sku || '').trim(), active: true })),
       });
     } catch (ex) { err.hidden = false; err.textContent = ex.message; err.focus(); return; }
@@ -552,14 +569,20 @@ function editProduct(existing) {
 
 async function viewSchedules() {
   const { db, fs } = F; const out = panel;
-  const [status, snap] = await Promise.all([callable('getStoreStatus', {}), fs.getDocs(fs.query(fs.collection(db, 'storeSchedules'), fs.orderBy('opensAt', 'desc')))]);
+  const snap = await fs.getDocs(fs.query(fs.collection(db, 'storeSchedules'), fs.orderBy('opensAt', 'desc')));
   const rows = snap.docs.map((d) => ({ id: d.id, ...d.data(), opens: ms(d.data().opensAt), closes: ms(d.data().closesAt) }));
+  const status = localStatus(rows);
   const nowMs = status.serverNowMillis;
   const stateOf = (s) => !s.active ? ['inactive', 'Inactive'] : (s.opens <= nowMs && nowMs < s.closes ? ['open', 'Open now'] : (s.opens > nowMs ? ['upcoming', 'Upcoming'] : ['ended', 'Ended']));
 
   clear(out).append(
     h('div', { class: 'cards' }, h('div', { class: 'card2' }, h('h3', {}, 'Right now'), h('p', { class: 'big' }, status.open ? 'Open' : 'Closed'), h('p', { class: 'fine', style: 'margin-top:.5rem' }, status.open ? `Closes ${fmtNY(status.closesAtMillis)}` : (status.nextOpensAtMillis ? `Next opening ${fmtNY(status.nextOpensAtMillis, { year: true })}` : 'No upcoming schedule. The shop stays closed.')))),
     h('p', { class: 'notice', style: 'margin-bottom:1rem' }, h('strong', {}, 'All times are New York time (Eastern, daylight-saving aware).'), ' The shop is open when opening time ≤ now < closing time. Active schedules cannot overlap. Changes apply immediately; no redeploy needed.'),
+    h('section', { class: 'panel', 'aria-labelledby': 'prev-h' }, h('h2', { id: 'prev-h' }, 'Preview the closed shop'),
+      h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'See exactly what visitors see when the shop is closed. Opens in a new tab; nothing is changed and no real data is used.'),
+      h('div', { class: 'row-actions' },
+        h('a', { class: 'btn btn--ghost btn--sm', href: '/shop/?preview=closed', target: '_blank', rel: 'noopener' }, 'Closed, with countdown to a drop'),
+        h('a', { class: 'btn btn--ghost btn--sm', href: '/shop/?preview=closed-none', target: '_blank', rel: 'noopener' }, 'Closed, no drop scheduled'))),
     h('div', { class: 'toolbar' }, h('button', { class: 'btn btn--primary btn--sm', type: 'button', onclick: () => editSchedule(null) }, 'New schedule')),
     h('section', { class: 'panel' }, h('h2', {}, 'Schedules'),
       rows.length ? h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Name', 'Opens (ET)', 'Closes (ET)', 'State', ''].map((x) => h('th', { scope: 'col' }, x)))),

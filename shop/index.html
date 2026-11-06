@@ -21,6 +21,18 @@
 <meta property="og:description" content="Limited True Heart Track Club merch drops.">
 <link rel="icon" type="image/png" href="/assets/favicon.png">
 <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://www.gstatic.com" crossorigin>
+<link rel="preconnect" href="https://firestore.googleapis.com" crossorigin>
+<link rel="preconnect" href="https://us-east1-trueheart-fe921.cloudfunctions.net" crossorigin>
+<link rel="preconnect" href="https://firebasestorage.googleapis.com" crossorigin>
+<link rel="modulepreload" href="/assets/js/shop.js">
+<link rel="modulepreload" href="/assets/js/firebase.js">
+<link rel="modulepreload" href="/assets/js/common.js">
+<link rel="modulepreload" href="/assets/js/cart.js">
+<link rel="modulepreload" href="/assets/js/firebase-config.js">
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js" crossorigin>
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js" crossorigin>
+<link rel="modulepreload" href="https://www.gstatic.com/firebasejs/11.10.0/firebase-functions.js" crossorigin>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -28,6 +40,8 @@
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
+<div class="preview-bar" id="preview-bar" hidden><strong>Preview only.</strong> <span id="preview-text"></span> <a href="/admin/">Back to admin</a> <a href="/shop/">Exit preview</a></div>
+<div class="announce" id="announce" hidden role="status"><span id="announce-text"></span></div>
 
 <header class="site-header">
   <div class="wrap bar">
@@ -62,6 +76,14 @@
       <p class="lede">Limited drops from the runners behind True Heart. Every drop is a pre-order: the shop is open for a set window, then we order and make exactly what was requested. No online payment: you submit an order, and we arrange payment and delivery with you directly.</p>
       <p id="status-chip" class="status-chip" hidden></p>
     </div>
+  </section>
+
+  <section class="trust" aria-label="How the shop works">
+    <ul class="wrap trust__grid">
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><div><strong>Limited pre-order drops</strong><span>Open for a set window, then we order what was requested.</span></div></li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M3 10h18M7 15h3"/></svg><div><strong>No payment online</strong><span>Submit your order. We arrange cash, Venmo or Zelle with you.</span></div></li>
+      <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8l-9-5-9 5 9 5 9-5zM3 8v8l9 5 9-5V8M12 13v8"/></svg><div><strong>Made for the runners</strong><span>Every piece is produced after the drop closes.</span></div></li>
+    </ul>
   </section>
 
   <div class="wrap">

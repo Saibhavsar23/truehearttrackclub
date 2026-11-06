@@ -44,9 +44,9 @@ function errMessage(e) {
   return (e && e.message && !/^internal$/i.test(e.message)) ? e.message : 'Something went wrong. Please try again.';
 }
 
-function productImage(p, cls = '') {
+function productImage(p, cls = '', eager = false) {
   const im = p.images && p.images[0];
-  if (im) return h('img', { src: im.url, alt: im.alt || p.name, loading: 'lazy', decoding: 'async', class: cls });
+  if (im) return h('img', { src: im.thumbUrl || im.url, alt: im.alt || p.name, loading: eager ? 'eager' : 'lazy', fetchpriority: eager ? 'high' : null, decoding: 'async', class: cls });
   return h('div', { class: 'noimg' }, 'Photo coming soon');
 }
 
@@ -71,11 +71,16 @@ async function loadCatalog() {
   ]);
   if (setSnap && setSnap.exists()) S.settings = { fulfillmentMethods: [], checkoutNotice: '', ...setSnap.data() };
   const list = await Promise.all(prodSnap.docs.map(async (d) => {
-    const vs = await fs.getDocs(fs.query(fs.collection(db, 'products', d.id, 'variants'), fs.where('active', '==', true)));
     const p = d.data();
+    let variants;
+    if (Array.isArray(p.variants)) variants = p.variants;                       // saved on the product itself: no extra read
+    else {                                                                        // older product that has not been re-saved yet
+      const vs = await fs.getDocs(fs.query(fs.collection(db, 'products', d.id, 'variants'), fs.where('active', '==', true)));
+      variants = vs.docs.map((v) => ({ id: v.id, ...v.data() }));
+    }
     return {
       id: d.id, name: p.name, description: p.description || '', priceCents: p.priceCents, images: p.images || [], featured: p.featured === true,
-      variants: vs.docs.map((v) => ({ id: v.id, ...v.data() })).sort(bySize),
+      variants: variants.map((v) => ({ id: v.id, size: v.size, color: v.color, sku: v.sku || null })).sort(bySize),
     };
   }));
   S.catalog = list.sort((a, b) => Number(b.featured) - Number(a.featured));
@@ -94,7 +99,7 @@ function reconcileCart() {
     if (!p || !v) { S.notes.set(lineKey(it), { bad: true, text: 'No longer available. Remove it to continue.' }); changed = true; continue; }
     if (p.priceCents !== it.priceCents) {
       S.notes.set(lineKey(it), { bad: false, text: `Price updated from ${money(it.priceCents)} to ${money(p.priceCents)}.` });
-      Cart.updateSnapshot(it.productId, it.variantId, { priceCents: p.priceCents, name: p.name, image: p.images[0] ? p.images[0].url : null });
+      Cart.updateSnapshot(it.productId, it.variantId, { priceCents: p.priceCents, name: p.name, image: p.images[0] ? (p.images[0].thumbUrl || p.images[0].url) : null });
       changed = true;
     }
   }
@@ -103,15 +108,71 @@ function reconcileCart() {
 
 /* ------------------------------------------------------------------ stage rendering */
 
+/* ---- announcement bar, closed-shop preview, instant paint from the last visit ---- */
+
+const PREVIEW = (() => { const v = new URLSearchParams(location.search).get('preview'); return v === 'closed' || v === 'closed-none' ? v : null; })();
+const barEl = $('#announce');
+const barText = $('#announce-text');
+const fmtDur = (ms) => {
+  let s = Math.max(0, Math.floor(ms / 1000));
+  const d = Math.floor(s / 86400); s -= d * 86400;
+  const hr = Math.floor(s / 3600); s -= hr * 3600;
+  const mi = Math.floor(s / 60); s -= mi * 60;
+  if (d) return `${d}d ${hr}h ${mi}m`;
+  if (hr) return `${hr}h ${mi}m`;
+  return `${mi}m ${String(s).padStart(2, '0')}s`;
+};
+function paintBar() {
+  if (!S.status) return;
+  barEl.hidden = false;
+  barEl.classList.toggle('announce--closed', !S.status.open);
+  const t = now();
+  if (S.status.open) barText.textContent = S.status.closesAtMillis ? `Pre-order drop is open · closes in ${fmtDur(S.status.closesAtMillis - t)}` : 'Pre-order drop is open';
+  else if (S.status.nextOpensAtMillis) barText.textContent = `Next drop opens ${fmtNY(S.status.nextOpensAtMillis)} · in ${fmtDur(S.status.nextOpensAtMillis - t)}`;
+  else barText.textContent = 'No drop right now · follow @truehearttrackclub for the next one';
+}
+
+const CACHE_KEY = 'thtc_shop_cache_v1';
+/** Show the catalog from the previous visit at once; the live data replaces it a moment later. Only while that visit saw the shop OPEN. */
+function paintFromCache() {
+  try {
+    const c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+    if (!c || !c.status || c.status.open !== true || !Array.isArray(c.catalog) || Date.now() - c.t > 6 * 3600e3) return false;
+    if (c.status.closesAtMillis && c.status.closesAtMillis <= Date.now()) return false;
+    S.status = c.status; S.skew = 0; S.catalog = c.catalog; S.settings = c.settings || S.settings;
+    showStage();
+    return true;
+  } catch (_) { return false; }
+}
+function saveCache() { try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), status: S.status, catalog: S.catalog, settings: S.settings })); } catch (_) {} }
+function clearCache() { try { localStorage.removeItem(CACHE_KEY); } catch (_) {} }
+
+/** ?preview=closed shows the closed shop exactly as visitors see it, without touching real data. For the admin's eyes. */
+function startPreview() {
+  const t = Date.now();
+  S.skew = 0;
+  S.status = PREVIEW === 'closed'
+    ? { open: false, scheduleName: 'Sample drop', closesAtMillis: null, nextOpensAtMillis: t + (3 * 24 + 5) * 3600e3 + 27 * 60e3, serverNowMillis: t }
+    : { open: false, scheduleName: null, closesAtMillis: null, nextOpensAtMillis: null, serverNowMillis: t };
+  $('#preview-bar').hidden = false;
+  $('#preview-text').textContent = PREVIEW === 'closed'
+    ? 'This is what visitors see when the shop is closed and a drop is scheduled (the date is a sample).'
+    : 'This is what visitors see when the shop is closed and no drop is scheduled.';
+  showStage();
+  setInterval(() => { tickCountdown(); paintBar(); }, 1000);
+}
+
 function setChip() {
   if (!S.status) { chip.hidden = true; return; }
   chip.hidden = false;
   chip.classList.toggle('status-chip--closed', !S.status.open);
   if (S.status.open) chip.textContent = S.status.closesAtMillis ? `Open now · closes ${fmtNY(S.status.closesAtMillis)}` : 'Open now';
   else chip.textContent = S.status.nextOpensAtMillis ? `Closed · opens ${fmtNY(S.status.nextOpensAtMillis)}` : 'Closed right now';
+  paintBar();
 }
 
 function renderLoading() {
+  S.paintKey = null;
   stage.setAttribute('aria-busy', 'true');
   clear(stage).append(
     h('p', { class: 'sr-only' }, 'Loading the shop'),
@@ -121,6 +182,7 @@ function renderLoading() {
 
 function stateBlock({ title, body, center = false, actions = [], extra = [], art = true }) {
   stage.setAttribute('aria-busy', 'false');
+  S.paintKey = null;
   const node = h('section', { class: `state${center ? ' state--center' : ''}`, 'aria-labelledby': 'state-h' },
     art && h('div', { class: 'state__art' }, icon.shirt()),
     h('h2', { class: 'h2', id: 'state-h', tabindex: '-1' }, title),
@@ -183,9 +245,10 @@ function renderCatalog() {
     stateBlock({ title: 'Merch is on the way', body: 'The first products are not up yet. Check back soon, or follow us on Instagram for the reveal.', center: true, actions: [h('a', { class: 'btn btn--primary', href: 'https://www.instagram.com/truehearttrackclub/', target: '_blank', rel: 'noopener' }, 'Follow on Instagram')] });
     return;
   }
-  const grid = h('ul', { class: 'grid', 'aria-label': 'Products' }, list.map((p) => {
+  const grid = h('ul', { class: 'grid', 'aria-label': 'Products' }, list.map((p, idx) => {
+    const second = p.images && p.images[1];
     return h('li', {}, h('button', { class: 'pcard', type: 'button', 'aria-haspopup': 'dialog', onclick: () => openProduct(p.id), 'aria-label': `${p.name}, ${money(p.priceCents)}` },
-      h('div', { class: 'pcard__media' }, productImage(p), p.featured ? h('span', { class: 'pcard__badge' }, 'Featured') : null),
+      h('div', { class: 'pcard__media' }, productImage(p, '', idx < 4), second ? h('img', { class: 'pcard__alt', src: second.thumbUrl || second.url, alt: '', loading: 'lazy', decoding: 'async' }) : null, p.featured ? h('span', { class: 'pcard__badge' }, 'Featured') : null),
       h('span', { class: 'pcard__name' }, p.name),
       h('span', { class: 'pcard__price' }, money(p.priceCents)),
     ));
@@ -210,7 +273,15 @@ function openProduct(id) {
     main.replaceChildren(im ? h('img', { src: im.url, alt: im.alt || p.name, decoding: 'async' }) : h('div', { class: 'noimg' }, 'Photo coming soon'));
     [...thumbs.children].forEach((b, i) => b.setAttribute('aria-current', String(i === sel.img)));
   };
-  p.images.forEach((im, i) => thumbs.append(h('button', { type: 'button', 'aria-label': `Show photo ${i + 1} of ${p.images.length}`, onclick: () => { sel.img = i; drawImg(); } }, h('img', { src: im.url, alt: '', loading: 'lazy' }))));
+  p.images.forEach((im, i) => thumbs.append(h('button', { type: 'button', 'aria-label': `Show photo ${i + 1} of ${p.images.length}`, onclick: () => { sel.img = i; drawImg(); } }, h('img', { src: im.thumbUrl || im.url, alt: '', loading: 'lazy' }))));
+  // swipe left/right on the photo (phones) to move through the photos
+  let swipeX = null;
+  main.addEventListener('pointerdown', (e) => { swipeX = e.clientX; });
+  main.addEventListener('pointerup', (e) => {
+    if (swipeX === null || p.images.length < 2) { swipeX = null; return; }
+    const dx = e.clientX - swipeX; swipeX = null;
+    if (Math.abs(dx) > 40) { sel.img = (sel.img + (dx < 0 ? 1 : -1) + p.images.length) % p.images.length; drawImg(); }
+  });
 
   const mkGroup = (label, name, values) => {
     const val = h('b', {});
@@ -237,6 +308,7 @@ function openProduct(id) {
     sel.qty = Math.min(maxQty(), Math.max(1, Number.isFinite(n) ? n : 1));
     qtyOut.value = String(sel.qty);
     minus.disabled = sel.qty <= 1; plus.disabled = sel.qty >= maxQty();
+    addBtn.textContent = (sel.size && sel.color && vOf(sel.size, sel.color)) ? `Add to cart · ${money(p.priceCents * sel.qty)}` : 'Add to cart';
   }
   /** If the chosen size does not come in the chosen color, clear the color. */
   function fixSelection(changed) {
@@ -270,7 +342,7 @@ function openProduct(id) {
     if (!sel.color) { msg.textContent = 'Choose a color first.'; gColor.inputs().find((i) => !i.disabled)?.focus(); return; }
     if (!v) { msg.textContent = 'That size and color is not available. Try another combination.'; return; }
     if (Cart.qtyInCart(p.id, v.id) + sel.qty > Cart.MAX_LINE_QTY) { msg.textContent = `You can order up to ${Cart.MAX_LINE_QTY} of one item.`; return; }
-    Cart.addItem({ productId: p.id, variantId: v.id, qty: sel.qty, name: p.name, size: v.size, color: v.color, priceCents: p.priceCents, image: p.images[0] ? p.images[0].url : null });
+    Cart.addItem({ productId: p.id, variantId: v.id, qty: sel.qty, name: p.name, size: v.size, color: v.color, priceCents: p.priceCents, image: p.images[0] ? (p.images[0].thumbUrl || p.images[0].url) : null });
     closeDialog(pdpDlg);
     announce(`${sel.qty} ${p.name}, ${v.size}, ${v.color} added to cart.`);
     openCart();
@@ -286,8 +358,9 @@ function openProduct(id) {
         p.description ? h('p', { class: 'pdp__desc' }, p.description) : null,
         gSize.node, gColor.node,
         h('fieldset', { class: 'opt' }, h('legend', {}, 'Quantity'), h('div', { class: 'qty' }, minus, qtyOut, plus)),
-        avail, msg, addBtn,
-        h('p', { class: 'fine' }, 'No payment is collected online. After you submit an order we contact you to arrange payment and pickup.'),
+        h('div', { class: 'pdp__buy' }, avail, msg, addBtn),
+        h('details', { class: 'acc', open: true }, h('summary', {}, 'How pre-orders work'), h('p', {}, 'The shop is open for a limited window. When it closes we place one order for everything requested, so nothing is made that nobody asked for. We email you when your order is confirmed and when it is ready.')),
+        h('details', { class: 'acc' }, h('summary', {}, 'Payment and delivery'), h('p', {}, 'No payment is collected on this website. After you submit an order we contact you to arrange payment (cash, Venmo or Zelle) and delivery.')),
       )),
   );
   drawImg(); update();
@@ -545,19 +618,26 @@ function showConfirmation(res) {
 
 function showStage() {
   if (!S.status) return;
-  if (S.status.open && S.catalog) renderCatalog(); else if (!S.status.open) renderClosed();
+  // skip the repaint when the live data matches what is already on screen (no flicker after an instant paint from cache)
+  const key = S.status.open ? `o:${JSON.stringify(S.catalog)}` : `c:${S.status.nextOpensAtMillis}:${S.status.scheduleName}`;
+  if (S.status.open && S.catalog) { if (key !== S.paintKey || S.view !== 'catalog') { renderCatalog(); S.paintKey = key; } }
+  else if (!S.status.open) { if (key !== S.paintKey || S.view !== 'closed') { renderClosed(); S.paintKey = key; } }
   setChip();
   if (cartDlg.open) renderCart();
 }
 
 async function init() {
   renderCartButton();
+  if (PREVIEW) { startPreview(); return; }
   try { const raw = sessionStorage.getItem('thtc_last_order'); if (raw) showConfirmation(JSON.parse(raw)); } catch (_) {}
   if (!isConfigured) { renderNotConfigured(); return; }
-  renderLoading();
+  if (!paintFromCache()) renderLoading();
   try {
-    await loadStatus();
-    if (S.status.open) await loadCatalog();
+    let catalogErr = null;
+    // the status and the catalog do not depend on each other: ask for both at once instead of one after the other
+    await Promise.all([loadStatus(), loadCatalog().catch((e) => { catalogErr = e; })]);
+    if (S.status.open && !S.catalog) throw catalogErr || new Error('catalog');
+    if (S.status.open) saveCache(); else clearCache();
     showStage();
     if (S.status.open && location.hash.startsWith('#p=')) openProduct(location.hash.slice(3));
     if (location.hash === '#cart') openCart();
@@ -569,6 +649,7 @@ async function init() {
 
   setInterval(() => {
     tickCountdown();
+    paintBar();
     if (!S.status) return;
     const t = now();
     const due = (S.status.open && S.status.closesAtMillis && t >= S.status.closesAtMillis) || (!S.status.open && S.status.nextOpensAtMillis && t >= S.status.nextOpensAtMillis);
@@ -585,7 +666,7 @@ async function refresh() {
   try {
     const wasOpen = S.status && S.status.open;
     await loadStatus();
-    if (S.status.open && (!wasOpen || !S.catalog)) await loadCatalog();
+    if (S.status.open && (!wasOpen || !S.catalog)) { await loadCatalog(); saveCache(); }
     if (wasOpen && !S.status.open) {
       closeDialog(pdpDlg); closeDialog(coDlg);
       toast('The shop has closed. Your cart is saved.');

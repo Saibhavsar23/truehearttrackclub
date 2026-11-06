@@ -50,6 +50,20 @@ test('product save writes public variant docs and no inventory records at all', 
   assert.equal((await db.collection('inventory').get()).size, 0);
 });
 
+test('the product document carries a copy of its active sizes/colors (one read for the whole shop), and image thumbnails are validated', async () => {
+  const pid = await makeProduct();
+  const doc = (await db.doc(`products/${pid}`).get()).data();
+  assert.deepEqual(doc.variants.map((v) => v.id).sort(), ['l__black', 'm__black']);
+  assert.ok(doc.variants.every((v) => v.size && v.color));
+  const img = { url: 'https://firebasestorage.googleapis.com/v0/b/x/o/a.webp', path: `products/${pid}/a.webp`, thumbUrl: 'https://firebasestorage.googleapis.com/v0/b/x/o/a-t.webp', thumbPath: `products/${pid}/a-t.webp`, alt: '' };
+  await svc.adminSaveProduct(db, 'adminuid', { id: pid, name: 'Team Hoodie', description: '', priceCents: 4500, active: true, images: [img], variants: [{ size: 'M', color: 'Black' }] });
+  const after = (await db.doc(`products/${pid}`).get()).data();
+  assert.equal(after.images[0].thumbPath, `products/${pid}/a-t.webp`);
+  assert.deepEqual(after.variants.map((v) => v.id), ['m__black']);
+  await assert.rejects(svc.adminSaveProduct(db, 'adminuid', { id: pid, name: 'x', description: '', priceCents: 1, active: true, images: [{ ...img, thumbPath: 'products/otherproduct/a-t.webp' }], variants: [{ size: 'M', color: 'Black' }] }), (e) => e.code === 'invalid-argument');
+  await assert.rejects(svc.adminSaveProduct(db, 'adminuid', { id: pid, name: 'x', description: '', priceCents: 1, active: true, images: [{ ...img, thumbUrl: 'https://evil.example.com/t.webp' }], variants: [{ size: 'M', color: 'Black' }] }), (e) => e.code === 'invalid-argument');
+});
+
 test('removing a size/color in the editor retires that variant instead of deleting it', async () => {
   const pid = await makeProduct();
   await svc.adminSaveProduct(db, 'adminuid', { id: pid, name: 'Team Hoodie', description: '', priceCents: 4500, active: true, images: [], variants: [{ size: 'M', color: 'Black' }] });

@@ -239,3 +239,12 @@ Please also do these in the consoles (they cannot be done from code):
    for up to an hour until their sign-in token expires.
 
 Local header test: `node scripts/serve-with-headers.js` serves the site with the same headers as production.
+
+## Speed, look and preview (Nov 2026)
+* The shop asks for the store status and the products at the same time, reads each product's sizes/colors from the product itself (one read
+  instead of one per product), shows the previous visit's catalog instantly while it refreshes, and uses small thumbnail photos
+  (admin uploads make both sizes). Products saved before this change still work; open and Save one to give it the faster path.
+* `getStoreStatus` and `submitOrder` keep one instance warm (`minInstances: 1` in `functions/index.js`) so the first visitor never waits for
+  a cold start. This costs a few dollars a month; remove those two options to stop it.
+* Admin > Schedules > "Preview the closed shop" opens `/shop/?preview=closed` (or `closed-none`): the closed page as visitors see it,
+  using no real data.

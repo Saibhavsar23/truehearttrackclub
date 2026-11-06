@@ -171,7 +171,13 @@ function validateProductInput(data) {
   for (const im of Array.isArray(data.images) ? data.images : []) {
     if (!im || typeof im.url !== 'string' || !isAllowedImageUrl(im.url)) throw new HttpError('invalid-argument', 'Invalid image URL.');
     if (typeof im.path !== 'string' || !/^products\/[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9._-]{1,120}$/.test(im.path)) throw new HttpError('invalid-argument', 'Invalid image path.');
-    images.push({ url: im.url, path: im.path, alt: cleanText(im.alt, 200, 'Image description') });
+    const entry = { url: im.url, path: im.path, alt: cleanText(im.alt, 200, 'Image description') };
+    if (im.thumbUrl !== undefined && im.thumbUrl !== null && im.thumbUrl !== '') {   // optional small copy used by the shop grid and cart
+      if (typeof im.thumbUrl !== 'string' || !isAllowedImageUrl(im.thumbUrl)) throw new HttpError('invalid-argument', 'Invalid image URL.');
+      if (typeof im.thumbPath !== 'string' || !/^products\/[A-Za-z0-9_-]{1,64}\/[A-Za-z0-9._-]{1,120}$/.test(im.thumbPath)) throw new HttpError('invalid-argument', 'Invalid image path.');
+      entry.thumbUrl = im.thumbUrl; entry.thumbPath = im.thumbPath;
+    }
+    images.push(entry);
   }
   if (images.length > 10) throw new HttpError('invalid-argument', 'A product can have at most 10 images.');
   const seen = new Set();

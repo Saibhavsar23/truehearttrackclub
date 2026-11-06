@@ -125,7 +125,7 @@ async function adminSaveProduct(db, uid, raw) {
   if (id !== undefined && id !== null && !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new HttpError('invalid-argument', 'Invalid product id.');
   const pref = id ? db.collection('products').doc(id) : db.collection('products').doc();
   id = pref.id;
-  for (const im of p.images) if (!im.path.startsWith(`products/${id}/`)) throw new HttpError('invalid-argument', 'Image does not belong to this product.');
+  for (const im of p.images) if (!im.path.startsWith(`products/${id}/`) || (im.thumbPath && !im.thumbPath.startsWith(`products/${id}/`))) throw new HttpError('invalid-argument', 'Image does not belong to this product.');
   for (const v of p.variants) if (!/^[a-z0-9][a-z0-9-]*__[a-z0-9][a-z0-9-]*$/.test(v.id)) throw new HttpError('invalid-argument', `Size and color must contain letters or numbers (${v.size} / ${v.color}).`);
   if (p.active && p.variants.filter((v) => v.active).length === 0) throw new HttpError('invalid-argument', 'Add at least one active size/color variant before activating a product.');
 
@@ -140,6 +140,8 @@ async function adminSaveProduct(db, uid, raw) {
       priceCents: p.priceCents,
       currency: 'USD',
       images: p.images,
+      // a copy of the active sizes/colors lives on the product itself, so the shop needs ONE read instead of one per product
+      variants: p.variants.filter((v) => v.active).map((v) => ({ id: v.id, size: v.size, color: v.color, sku: v.sku })),
       active: p.active,
       featured: p.featured,
       createdAt: psnap.exists ? psnap.data().createdAt : now,
