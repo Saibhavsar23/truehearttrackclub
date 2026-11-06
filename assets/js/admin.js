@@ -5,10 +5,12 @@ import { money, fmtNY, toNyLocalInput, h, $, clear, toast, icon } from './common
    Cloud Functions (every write re-verifies the admin claim server-side). */
 
 const app = $('#app');
-const STATUS_NEXT = { submitted: ['confirmed', 'cancelled'], confirmed: ['preparing', 'ready', 'fulfilled', 'cancelled'], preparing: ['ready', 'fulfilled', 'cancelled'], ready: ['fulfilled', 'cancelled'], fulfilled: [], cancelled: [] };
-const STATUS_LABEL = { submitted: 'Submitted', confirmed: 'Confirmed', preparing: 'Preparing', ready: 'Ready', fulfilled: 'Fulfilled', cancelled: 'Cancelled' };
+const LEGACY_STATUS = { submitted: 'ordered', confirmed: 'ordered', preparing: 'ordered', ready: 'ordered', fulfilled: 'delivered' };
+const normStatus = (s) => LEGACY_STATUS[s] || s;
+const STATUS_NEXT = { ordered: ['delivered', 'cancelled'], delivered: ['ordered'], cancelled: [] };
+const STATUS_LABEL = { ordered: 'Ordered', delivered: 'Delivered', cancelled: 'Cancelled' };
 const PAY_LABEL = { cash: 'Cash', venmo: 'Venmo', zelle: 'Zelle' };
-const ACTION_LABEL = { confirmed: 'Confirm order', preparing: 'Mark preparing', ready: 'Mark ready', fulfilled: 'Mark fulfilled', cancelled: 'Cancel order' };
+const ACTION_LABEL = { delivered: 'Mark delivered', ordered: 'Undo: back to ordered', cancelled: 'Cancel order' };
 
 let F;                      // firebase handles
 const cache = { products: null };
@@ -98,6 +100,8 @@ function renderShell() {
     h('div', { class: 'adm-top' }, h('h1', {}, 'Store dashboard'), h('div', { class: 'adm-who' }, h('span', {}, user.email), h('a', { class: 'linkbtn', href: '/shop/' }, 'View shop'), h('button', { class: 'linkbtn', type: 'button', onclick: () => F.au.signOut(F.auth) }, 'Sign out'))),
     tablist, panel));
   go(location.hash.startsWith('#order=') ? 'orders' : tab, false, true);
+  // one-time tidy-up of orders created under the old six-stage names (harmless when there is nothing to do)
+  callable('adminNormalizeOrders', {}).then((r) => { if (r && r.migrated) go(tab); }).catch(() => {});
 }
 
 function go(id, focus, initial) {
@@ -161,7 +165,7 @@ async function viewOverview() {
   const paidOrders = live.filter((o) => o.paid === true);
   const unpaidOrders = live.filter((o) => o.paid !== true);
   const collected = sum(paidOrders, (o) => o.subtotalCents);
-  const awaitingAction = live.filter((o) => o.status === 'submitted').length;
+  const awaitingAction = live.filter((o) => o.status === 'ordered').length;
   const failedMail = failedSnap.size;
   const customers = new Set(live.map((o) => String(o.customerEmail || '').toLowerCase())).size;
   const times = live.map((o) => o.createdAtMillis).filter(Boolean);
@@ -221,7 +225,7 @@ async function viewOverview() {
       card('Items sold', String(units), live.length ? `${(units / live.length).toFixed(1)} per order on average` : 'No orders yet'),
       card('Order value', money(revenue), `${money(collected)} paid · ${money(revenue - collected)} still to collect`),
       card('Paid', `${paidOrders.length} / ${live.length}`, `${pct(paidOrders.length, live.length)} of orders marked paid`),
-      card('Not paid yet', String(unpaidOrders.length), `${awaitingAction} still "submitted" (not confirmed)`),
+      card('Not paid yet', String(unpaidOrders.length), `${awaitingAction} not delivered yet`),
       card('Failed emails', String(failedMail), failedMail ? 'Open the order to retry' : 'None'),
     ),
     section('ov-status', 'Orders by status', table(['Status', 'Orders', 'Paid', 'Not paid', 'Value'], byStatus, ['Total (not cancelled)', String(live.length), String(paidOrders.length), String(unpaidOrders.length), money(revenue)])),
@@ -249,7 +253,7 @@ async function viewOverview() {
 
 /* ============================== orders ============================== */
 
-const snapOrder = (d) => ({ id: d.id, ...d.data(), createdAtMillis: ms(d.data().createdAt) });
+const snapOrder = (d) => ({ id: d.id, ...d.data(), status: normStatus(d.data().status), createdAtMillis: ms(d.data().createdAt) });
 
 const payTag = (o) => (o.status === 'cancelled' ? h('span', { class: 'fine' }, 'n/a') : (o.paid === true ? tag('paid', `Paid${PAY_LABEL[o.paymentMethod] ? ` · ${PAY_LABEL[o.paymentMethod]}` : ''}`) : tag('unpaid', 'Not paid')));
 
@@ -353,8 +357,8 @@ async function openOrder(o) {
   for (const next of STATUS_NEXT[o.status] || []) {
     const btn = h('button', { class: next === 'cancelled' ? 'btn btn--ghost btn--sm' : 'btn btn--primary btn--sm', type: 'button' }, ACTION_LABEL[next]);
     btn.onclick = () => {
-      const msg = next === 'cancelled' ? `Cancel ${o.orderNumber}? The customer is emailed. This cannot be undone.` : `Mark ${o.orderNumber} as ${STATUS_LABEL[next].toLowerCase()}? The customer will be emailed.`;
-      const unpaid = next === 'fulfilled' && o.paid !== true ? `\n\n${o.orderNumber} is NOT marked paid yet.` : '';
+      const msg = next === 'cancelled' ? `Cancel ${o.orderNumber}? The customer is emailed. This cannot be undone.` : (next === 'ordered' ? `Move ${o.orderNumber} back to Ordered? The customer is not emailed.` : `Mark ${o.orderNumber} as delivered? The customer will be emailed.`);
+      const unpaid = next === 'delivered' && o.paid !== true ? `\n\n${o.orderNumber} is NOT marked paid yet.` : '';
       const paidWarn = next === 'cancelled' && o.paid === true ? `\n\n${o.orderNumber} is marked PAID. Refund the customer and set it to Not paid first.` : '';
       if (!confirm(msg + unpaid + paidWarn)) return;
       guarded(btn, async () => { await callable('adminUpdateOrderStatus', { orderId: o.id, status: next }); ordersDirty = true; toast(`${o.orderNumber}: ${STATUS_LABEL[next]}`); await openOrder(o); });
@@ -383,7 +387,7 @@ async function openOrder(o) {
         h('tbody', {}, o.items.map((i) => h('tr', {}, h('td', {}, i.productName), h('td', {}, i.size), h('td', {}, i.color), h('td', { class: 'mono' }, i.sku || ''), h('td', {}, String(i.quantity)), h('td', {}, money(i.unitPriceCents)), h('td', {}, money(i.lineTotalCents)))),
           h('tr', {}, h('td', { colspan: 6, style: 'text-align:right;font-weight:700' }, 'Subtotal'), h('td', { style: 'font-weight:700' }, money(o.subtotalCents)))))),
       actions.children.length ? h('div', {}, h('h3', { class: 'lbl', style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'Change status'), actions, h('p', { class: 'fine', style: 'margin-top:.5rem' }, 'Changing status never marks anything as paid. Allowed next steps are shown.')) : h('p', { class: 'fine' }, 'This order is in a final state.'),
-      h('div', {}, h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'History'), h('ul', {}, (o.statusHistory || []).map((x) => h('li', { class: 'fine' }, `${fmtNY(x.atMillis)}: ${STATUS_LABEL[x.status] || x.status}`)))),
+      h('div', {}, h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'History'), h('ul', {}, (o.statusHistory || []).map((x) => h('li', { class: 'fine' }, `${fmtNY(x.atMillis)}: ${STATUS_LABEL[normStatus(x.status)] || x.status}`)))),
       h('div', {}, h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'Emails'),
         mails.length ? h('ul', {}, mails.map((m) => h('li', { class: 'fine', style: 'display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;padding:.3rem 0' }, tag(m.status === 'sent' ? 'sent' : m.status === 'failed' ? 'failed' : 'pending', m.status === 'sent' ? 'sent to Make' : m.status), `${m.kind.replace(/_/g, ' ')} → ${m.to}`, m.attempts ? `(attempts: ${m.attempts})` : '', m.lastError && m.status !== 'sent' ? h('span', { class: 'alert' }, m.lastError) : null,
           m.status === 'failed' ? h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: (e) => guarded(e.currentTarget, async () => { await callable('adminResendMail', { mailId: m.id }); ordersDirty = true; toast('Email re-queued'); await openOrder(o); }) }, 'Retry') : null))) : h('p', { class: 'fine' }, 'No email records.')),

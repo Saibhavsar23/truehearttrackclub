@@ -82,7 +82,7 @@ test('successful order: authoritative pricing, order + 2 mail jobs + counter com
   const orders = await db.collection('orders').get();
   assert.equal(orders.size, 1);
   const o = orders.docs[0].data();
-  assert.equal(o.status, 'submitted');
+  assert.equal(o.status, 'ordered');
   assert.equal(o.paymentStatus, 'not_collected_online');
   assert.equal(o.items[0].unitPriceCents, 4500);
   assert.equal(o.items[0].productName, 'Team Hoodie');
@@ -233,25 +233,45 @@ async function placeOrder(qty = 2) {
   return { pid, orderId: order.id, res };
 }
 
-test('status transitions are validated; status emails never claim payment/shipping', async () => {
+test('status transitions are validated; only delivered and cancelled send an email, and none claims payment', async () => {
   const { orderId } = await placeOrder();
-  await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'fulfilled'), (e) => e.code === 'failed-precondition');
-  for (const s of ['confirmed', 'preparing', 'ready', 'fulfilled']) await svc.adminUpdateOrderStatus(db, 'u', orderId, s);
-  await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled'), (e) => e.code === 'failed-precondition');
+  await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'ordered'), (e) => e.code === 'failed-precondition');   // already ordered
   await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'bogus'), (e) => e.code === 'invalid-argument');
+  await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'submitted'), (e) => e.code === 'invalid-argument');       // old names are no longer accepted as targets
+  await svc.adminUpdateOrderStatus(db, 'u', orderId, 'delivered');
+  await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled'), (e) => e.code === 'failed-precondition');   // a delivered order cannot be cancelled
+  await svc.adminUpdateOrderStatus(db, 'u', orderId, 'ordered');                                                              // undo
+  await svc.adminUpdateOrderStatus(db, 'u', orderId, 'delivered');
   const o = (await db.doc(`orders/${orderId}`).get()).data();
-  assert.deepEqual(o.statusHistory.map((h) => h.status), ['submitted', 'confirmed', 'preparing', 'ready', 'fulfilled']);
+  assert.deepEqual(o.statusHistory.map((h) => h.status), ['ordered', 'delivered', 'ordered', 'delivered']);
   assert.equal(o.paymentStatus, 'not_collected_online');
+  assert.equal(o.paid, false);                                                                                                // delivering never marks anything paid
   const statusMail = (await db.collection('mail').where('kind', '==', 'customer_status').get()).docs.map((d) => d.data());
-  assert.equal(statusMail.length, 4);
-  for (const m of statusMail) assert.doesNotMatch(m.text, /shipped|delivered|has been paid|payment received/i);
+  assert.equal(statusMail.length, 2);                                                                                         // the two "delivered" emails; the undo sends none
+  for (const m of statusMail) assert.doesNotMatch(m.text, /has been paid|payment received|shipped/i);
+});
+
+test('orders created under the old six-stage names keep working and can be renamed in one go', async () => {
+  const { orderId, pid } = await placeOrder();
+  await db.doc(`orders/${orderId}`).update({ status: 'preparing' });
+  const second = await svc.submitOrder(db, orderReq(pid, M_BLACK, 1), ctx({ ip: '5.5.5.5' }));
+  const id2 = (await db.collection('orders').where('orderNumber', '==', second.orderNumber).get()).docs[0].id;
+  await db.doc(`orders/${id2}`).update({ status: 'fulfilled' });
+  await svc.adminUpdateOrderStatus(db, 'u', orderId, 'delivered');                      // old "preparing" can be delivered directly
+  assert.equal((await db.doc(`orders/${orderId}`).get()).data().status, 'delivered');
+  await db.doc(`orders/${orderId}`).update({ status: 'ready' });
+  const r = await svc.normalizeLegacyOrders(db);
+  assert.equal(r.migrated, 2);
+  assert.equal((await db.doc(`orders/${orderId}`).get()).data().status, 'ordered');
+  assert.equal((await db.doc(`orders/${id2}`).get()).data().status, 'delivered');
+  assert.equal((await svc.normalizeLegacyOrders(db)).migrated, 0);
 });
 
 test('cancelling is final and emails the customer; a cancelled order cannot change again', async () => {
   const { orderId } = await placeOrder();
   await svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled');
   await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled'), (e) => e.code === 'failed-precondition');
-  await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'confirmed'), (e) => e.code === 'failed-precondition');
+  await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'ordered'), (e) => e.code === 'failed-precondition');
   assert.equal((await db.doc(`orders/${orderId}`).get()).data().status, 'cancelled');
   assert.equal((await db.collection('mail').where('kind', '==', 'customer_status').get()).size, 1);
 });
@@ -267,7 +287,7 @@ test('payment is recorded by an admin only: needs a method, is reversible, and a
   const r = await svc.adminSetOrderPayment(db, 'u', orderId, { paid: true, method: 'venmo' }, () => 1700000000000);
   assert.deepEqual(r, { paid: true, paymentMethod: 'venmo', paidAtMillis: 1700000000000 });
   o = (await db.doc(`orders/${orderId}`).get()).data();
-  assert.equal(o.paid, true); assert.equal(o.paymentMethod, 'venmo'); assert.equal(o.status, 'submitted');
+  assert.equal(o.paid, true); assert.equal(o.paymentMethod, 'venmo'); assert.equal(o.status, 'ordered');
   await svc.adminSetOrderPayment(db, 'u', orderId, { paid: false, method: null });
   o = (await db.doc(`orders/${orderId}`).get()).data();
   assert.equal(o.paid, false); assert.equal(o.paymentMethod, null); assert.equal(o.paidAtMillis, null);
@@ -281,7 +301,7 @@ test('a paid order cannot be cancelled until it is marked not paid (refund first
   const { orderId } = await placeOrder();
   await svc.adminSetOrderPayment(db, 'u', orderId, { paid: true, method: 'zelle' });
   await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled'), (e) => e.code === 'failed-precondition' && /marked paid/.test(e.message));
-  assert.equal((await db.doc(`orders/${orderId}`).get()).data().status, 'submitted');
+  assert.equal((await db.doc(`orders/${orderId}`).get()).data().status, 'ordered');
   await svc.adminSetOrderPayment(db, 'u', orderId, { paid: false });
   await svc.adminUpdateOrderStatus(db, 'u', orderId, 'cancelled');
   assert.equal((await db.doc(`orders/${orderId}`).get()).data().status, 'cancelled');

@@ -81,12 +81,9 @@ function customerConfirmation(order) {
   return { subject: `Your True Heart order ${order.orderNumber} (payment not yet collected)`, text, html };
 }
 
-/** Wording is deliberately tied to the actual status. Nothing here claims payment, shipping or delivery. */
+/** Wording is tied to the real status. "Delivered" is only sent when an admin marks the order delivered. Nothing here claims payment. */
 const STATUS_COPY = {
-  confirmed: 'Your order has been confirmed by True Heart Track Club.',
-  preparing: 'Your order is now being prepared.',
-  ready: 'Your order is marked ready. We will be in touch about how to get it to you.',
-  fulfilled: 'Your order has been marked as fulfilled.',
+  delivered: 'Your order has been marked as delivered. Thank you for supporting True Heart Track Club!',
   cancelled: 'Your order has been cancelled. If you did not expect this, reply to this email.',
 };
 

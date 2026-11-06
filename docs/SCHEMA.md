@@ -67,13 +67,13 @@ Empty by default. When empty, orders record `fulfillmentMethod: "arranged_separa
 ### Status transitions
 | from | allowed next |
 |---|---|
-| submitted | confirmed, cancelled |
-| confirmed | preparing, ready, fulfilled, cancelled |
-| preparing | ready, fulfilled, cancelled |
-| ready | fulfilled, cancelled |
-| fulfilled, cancelled | none (terminal) |
+| ordered | delivered, cancelled |
+| delivered | ordered (undo a mistake) |
+| cancelled | none (final) |
 
-**Cancellation policy:** a non-terminal order can be cancelled (the customer is emailed). A fulfilled order cannot be cancelled. No status change implies payment.
+Only `delivered` and `cancelled` email the customer (the order confirmation is sent when the order is placed). Payment is separate: the `paid` checkbox.
+
+**Cancellation policy:** a non-terminal order can be cancelled (the customer is emailed). A delivered order cannot be cancelled (undo it to Ordered first). No status change implies payment.
 
 **Deleting:** `adminDeleteOrder` permanently removes an order and its `mail` records (admin only, irreversible, no email sent).
 

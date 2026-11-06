@@ -24,6 +24,16 @@ table.t tr.click{ cursor:pointer; }
 @media (hover:hover){ table.t tr.click:hover td{ background:var(--panel-2); } }
 table.t td .linkbtn{ min-height:auto; }
 .tag{ display:inline-block; padding:.25rem .55rem; border:1px solid var(--line-strong); font:700 .66rem/1 var(--body); letter-spacing:.12em; text-transform:uppercase; white-space:nowrap; }
+.tag--ordered{ border-color:#6aa6ff; color:#8fbfff; }
+.tag--delivered,.tag--paid{ border-color:var(--ok); color:var(--ok); }
+.tag--unpaid{ border-color:var(--warn); color:var(--warn); }
+.bars{ display:grid; gap:.5rem; }
+.barrow{ display:grid; grid-template-columns:7.5rem 1fr auto; gap:.8rem; align-items:center; font-size:.85rem; }
+.barrow__l{ color:var(--faint); font-variant-numeric:tabular-nums; }
+.barrow__b{ display:block; height:12px; background:rgba(255,255,255,.06); }
+.barrow__b span{ display:block; height:100%; background:var(--red); }
+.barrow__v{ color:var(--faint); white-space:nowrap; }
+@media (max-width:560px){ .barrow{ grid-template-columns:5.5rem 1fr; } .barrow__v{ grid-column:1 / -1; } }
 .tag--submitted{ border-color:var(--warn); color:var(--warn); }
 .tag--confirmed,.tag--preparing,.tag--ready{ border-color:#6aa6ff; color:#8fbfff; }
 .tag--fulfilled,.tag--open,.tag--sent{ border-color:var(--ok); color:var(--ok); }

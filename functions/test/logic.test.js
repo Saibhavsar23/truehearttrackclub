@@ -86,13 +86,20 @@ test('reports inactive products and unknown variants together; quantity is never
   assert.equal(r.lines[0].quantity, 10);
 });
 
-test('order status transitions', () => {
-  assert.ok(L.canTransition('submitted', 'confirmed'));
+test('order status transitions (ordered / delivered / cancelled), old names still understood', () => {
+  assert.ok(L.canTransition('ordered', 'delivered'));
+  assert.ok(L.canTransition('ordered', 'cancelled'));
+  assert.ok(L.canTransition('delivered', 'ordered'));          // undo a mistake
+  assert.ok(!L.canTransition('delivered', 'cancelled'));
+  assert.ok(!L.canTransition('cancelled', 'ordered'));
+  assert.ok(!L.canTransition('ordered', 'ordered'));
+  assert.ok(!L.canTransition('nonsense', 'delivered'));
+  // legacy names from before the three-stage model
+  assert.ok(L.canTransition('submitted', 'delivered'));
   assert.ok(L.canTransition('preparing', 'cancelled'));
-  assert.ok(!L.canTransition('submitted', 'fulfilled'));
   assert.ok(!L.canTransition('fulfilled', 'cancelled'));
-  assert.ok(!L.canTransition('cancelled', 'confirmed'));
-  assert.ok(!L.canTransition('nonsense', 'confirmed'));
+  assert.equal(L.normalizeStatus('ready'), 'ordered');
+  assert.equal(L.normalizeStatus('fulfilled'), 'delivered');
 });
 
 test('variant ids are stable and valid for Firestore document ids', () => {

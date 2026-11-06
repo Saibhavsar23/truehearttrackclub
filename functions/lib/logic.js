@@ -13,20 +13,22 @@ const LIMITS = {
   priceMaxCents: 100000, // $1,000 per unit sanity cap
 };
 
-const ORDER_STATUSES = ['submitted', 'confirmed', 'preparing', 'ready', 'fulfilled', 'cancelled'];
+const ORDER_STATUSES = ['ordered', 'delivered', 'cancelled'];
 
-/** Allowed transitions. fulfilled and cancelled are terminal. */
+/** Orders created before the three-stage model carry the old names; they mean the same as the new ones. */
+const LEGACY_STATUS = { submitted: 'ordered', confirmed: 'ordered', preparing: 'ordered', ready: 'ordered', fulfilled: 'delivered' };
+const normalizeStatus = (s) => LEGACY_STATUS[s] || s;
+
+/** Allowed transitions. cancelled is final; delivered can be undone (back to ordered) in case of a mistake. */
 const TRANSITIONS = {
-  submitted: ['confirmed', 'cancelled'],
-  confirmed: ['preparing', 'ready', 'fulfilled', 'cancelled'],
-  preparing: ['ready', 'fulfilled', 'cancelled'],
-  ready: ['fulfilled', 'cancelled'],
-  fulfilled: [],
+  ordered: ['delivered', 'cancelled'],
+  delivered: ['ordered'],
   cancelled: [],
 };
 
 function canTransition(from, to) {
-  return Array.isArray(TRANSITIONS[from]) && TRANSITIONS[from].includes(to);
+  const f = normalizeStatus(from);
+  return Array.isArray(TRANSITIONS[f]) && TRANSITIONS[f].includes(to);
 }
 
 class HttpError extends Error {
@@ -216,7 +218,7 @@ const PAYMENT_METHODS = ['cash', 'venmo', 'zelle'];
 
 module.exports = {
   PAYMENT_METHODS,
-  LIMITS, ORDER_STATUSES, TRANSITIONS, canTransition, HttpError, cleanText,
+  LIMITS, ORDER_STATUSES, LEGACY_STATUS, normalizeStatus, TRANSITIONS, canTransition, HttpError, cleanText,
   validateOrderRequest, priceOrder, variantIdFor, slugify, validateProductInput, validateScheduleName,
   hashKey, formatOrderNumber, money,
 };

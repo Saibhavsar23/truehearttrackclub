@@ -292,12 +292,12 @@ async function submitOrder(db, data, ctx) {
       items: priced.lines,
       subtotalCents: priced.subtotalCents,
       currency: 'USD',
-      status: 'submitted',
+      status: 'ordered',
       paymentStatus: 'not_collected_online',   // the website never collects money; `paid` below is recorded by hand by an admin
       paid: false,
       paymentMethod: null,
       paidAtMillis: null,
-      statusHistory: [{ status: 'submitted', byUid: null, atMillis: nowMs }],
+      statusHistory: [{ status: 'ordered', byUid: null, atMillis: nowMs }],
       notificationStatus: { admin: 'pending', customer: 'pending' },
       createdAt: nowDate,
       updatedAt: nowDate,
@@ -318,13 +318,14 @@ async function submitOrder(db, data, ctx) {
 
 async function adminUpdateOrderStatus(db, uid, orderId, newStatus, now = () => Date.now()) {
   if (typeof orderId !== 'string' || !/^[A-Za-z0-9]{10,40}$/.test(orderId)) throw new HttpError('invalid-argument', 'Invalid order id.');
-  if (!L.ORDER_STATUSES.includes(newStatus) || newStatus === 'submitted') throw new HttpError('invalid-argument', 'Invalid status.');
+  if (!L.ORDER_STATUSES.includes(newStatus)) throw new HttpError('invalid-argument', 'Invalid status.');
   const ref = db.collection('orders').doc(orderId);
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
     const o = snap.data();
-    if (!L.canTransition(o.status, newStatus)) throw new HttpError('failed-precondition', `An order that is "${o.status}" cannot be changed to "${newStatus}".`);
+    const current = L.normalizeStatus(o.status);
+    if (!L.canTransition(current, newStatus)) throw new HttpError('failed-precondition', `An order that is "${current}" cannot be changed to "${newStatus}".`);
     if (newStatus === 'cancelled' && o.paid === true) throw new HttpError('failed-precondition', 'This order is marked paid. Refund the customer, change it to Not paid, then cancel it.');
     const nowMs = now();
     const nowDate = toDate(nowMs);
@@ -414,6 +415,22 @@ async function setAdmin(auth, callerUid, rawEmail, makeAdmin) {
   return { email, admin: false };
 }
 
+/** One-off tidy-up: rename old statuses (submitted/confirmed/preparing/ready/fulfilled) to the three-stage ones. Safe to run any number of times. */
+async function normalizeLegacyOrders(db) {
+  let migrated = 0;
+  for (const old of Object.keys(L.LEGACY_STATUS)) {
+    const snap = await db.collection('orders').where('status', '==', old).get();
+    for (let i = 0; i < snap.docs.length; i += 400) {
+      const batch = db.batch();
+      const part = snap.docs.slice(i, i + 400);
+      part.forEach((d) => batch.update(d.ref, { status: L.LEGACY_STATUS[old] }));
+      await batch.commit();
+      migrated += part.length;
+    }
+  }
+  return { migrated };
+}
+
 /** Permanently delete an order and its email records. Admin-only (checked by the caller). */
 async function adminDeleteOrder(db, orderId) {
   if (typeof orderId !== 'string' || !/^[A-Za-z0-9]{10,40}$/.test(orderId)) throw new HttpError('invalid-argument', 'Invalid order id.');
@@ -444,6 +461,6 @@ async function adminResendMail(db, mailId, now = () => Date.now()) {
 
 module.exports = {
   RATE, getStoreStatus, adminSaveSchedule, adminDeleteSchedule, getPublicSettings, adminSaveSettings,
-  adminSaveProduct, submitOrder, listAdmins, setAdmin, adminUpdateOrderStatus, adminSetOrderPayment, adminDeleteOrder, adminResendMail, scheduleFromDoc,
+  adminSaveProduct, submitOrder, normalizeLegacyOrders, listAdmins, setAdmin, adminUpdateOrderStatus, adminSetOrderPayment, adminDeleteOrder, adminResendMail, scheduleFromDoc,
   getMailWebhook, adminGetMailConfig, adminSaveMailWebhook, adminSendTestMail,
 };

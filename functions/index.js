@@ -99,6 +99,10 @@ exports.adminSetAdmin = onCall(base, wrap(async (request) => {
   logger.warn(`admin access ${out.admin ? 'granted to' : 'removed from'} ${out.email} by ${uid}`);
   return out;
 }));
+exports.adminNormalizeOrders = onCall(base, wrap(async (request) => {
+  await requireAdmin(request);
+  return svc.normalizeLegacyOrders(db);
+}));
 exports.adminDeleteOrder = onCall(base, wrap(async (request) => {
   await requireAdmin(request);
   return svc.adminDeleteOrder(db, request.data && request.data.orderId);

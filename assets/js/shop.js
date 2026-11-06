@@ -359,7 +359,7 @@ function openProduct(id) {
         gSize.node, gColor.node,
         h('fieldset', { class: 'opt' }, h('legend', {}, 'Quantity'), h('div', { class: 'qty' }, minus, qtyOut, plus)),
         h('div', { class: 'pdp__buy' }, avail, msg, addBtn),
-        h('details', { class: 'acc', open: true }, h('summary', {}, 'How pre-orders work'), h('p', {}, 'The shop is open for a limited window. When it closes we place one order for everything requested, so nothing is made that nobody asked for. We email you when your order is confirmed and when it is ready.')),
+        h('details', { class: 'acc', open: true }, h('summary', {}, 'How pre-orders work'), h('p', {}, 'The shop is open for a limited window. When it closes we place one order for everything requested, so nothing is made that nobody asked for. We email you when your order is delivered.')),
         h('details', { class: 'acc' }, h('summary', {}, 'Payment and delivery'), h('p', {}, 'No payment is collected on this website. After you submit an order we contact you to arrange payment (cash, Venmo or Zelle) and delivery.')),
       )),
   );
@@ -604,7 +604,7 @@ function showConfirmation(res) {
     h('div', { class: 'notice notice--warn' }, h('strong', {}, 'Payment has not been collected.'), ' Nothing was charged on this website, and this order is not paid yet.'),
     h('div', {}, h('h3', { style: 'font:600 1rem/1.3 var(--body);margin-bottom:.6rem' }, 'What happens next'),
       h('ol', { class: 'steps' },
-        h('li', {}, 'We review your order and email you to confirm it.'),
+        h('li', {}, 'We save your order and email you a confirmation.'),
         h('li', {}, 'When the drop closes we place one order for everything requested, then arrange payment and delivery with you directly.'),
         h('li', {}, `A confirmation email should arrive at ${res.customerEmail} shortly. If you do not see it within a few minutes, check your spam folder or write to truehearttrackclub@gmail.com with ${res.orderNumber}.`))),
     h('div', {}, h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => { box.hidden = true; clear(box); try { sessionStorage.removeItem('thtc_last_order'); } catch (_) {} } }, 'Dismiss')),
