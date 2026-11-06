@@ -17,6 +17,7 @@ const cache = { products: null };
 let tab = 'overview';
 let user = null;
 
+const loaderBlock = (text = 'Loading…') => h('div', { class: 'loadwrap', role: 'status' }, h('span', { class: 'loader', 'aria-hidden': 'true' }), h('p', { class: 'fine' }, text));
 const tag = (cls, text) => h('span', { class: `tag tag--${cls}` }, text);
 const ms = (ts) => (ts && ts.toMillis ? ts.toMillis() : null);
 
@@ -88,31 +89,92 @@ let panel;
 function renderShell() {
   const tablist = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Dashboard sections' }, TABS.map(([id, label]) => h('button', {
     role: 'tab', id: `tab-${id}`, 'aria-selected': String(id === tab), 'aria-controls': 'panel', tabindex: id === tab ? '0' : '-1',
-    onclick: () => go(id),
+    onclick: () => go(id, false, false, true),
     onkeydown: (e) => {
       const i = TABS.findIndex(([x]) => x === tab);
-      if (e.key === 'ArrowRight') go(TABS[(i + 1) % TABS.length][0], true);
-      if (e.key === 'ArrowLeft') go(TABS[(i + TABS.length - 1) % TABS.length][0], true);
+      if (e.key === 'ArrowRight') go(TABS[(i + 1) % TABS.length][0], true, false, true);
+      if (e.key === 'ArrowLeft') go(TABS[(i + TABS.length - 1) % TABS.length][0], true, false, true);
     },
   }, label)));
   panel = h('div', { id: 'panel', role: 'tabpanel', 'aria-labelledby': `tab-${tab}` });
   clear(app).append(h('div', { class: 'adm-wrap' },
-    h('div', { class: 'adm-top' }, h('h1', {}, 'Store dashboard'), h('div', { class: 'adm-who' }, h('span', {}, user.email), h('a', { class: 'linkbtn', href: '/shop/' }, 'View shop'), h('button', { class: 'linkbtn', type: 'button', onclick: () => F.au.signOut(F.auth) }, 'Sign out'))),
+    h('div', { class: 'adm-top' },
+      h('div', { class: 'adm-brand' }, h('a', { class: 'adm-logo', href: '/', 'aria-label': 'True Heart Track Club, home' }, h('span', { class: 'logo', role: 'img', 'aria-label': 'True Heart Track Club logo' })), h('div', {}, h('h1', {}, 'Store dashboard'), h('p', { class: 'adm-sub' }, 'True Heart Track Club'))),
+      accountMenu()),
     tablist, panel));
   go(location.hash.startsWith('#order=') ? 'orders' : tab, false, true);
   // one-time tidy-up of orders created under the old six-stage names (harmless when there is nothing to do)
   callable('adminNormalizeOrders', {}).then((r) => { if (r && r.migrated) go(tab); }).catch(() => {});
 }
 
-function go(id, focus, initial) {
+/** The little account menu in the top-right corner. */
+function accountMenu() {
+  const initial = String(user.email || '?').trim().charAt(0).toUpperCase();
+  const btn = h('button', { class: 'acct', type: 'button', id: 'acct-btn', 'aria-haspopup': 'menu', 'aria-expanded': 'false' },
+    h('span', { class: 'acct__av', 'aria-hidden': 'true' }, initial), h('span', { class: 'acct__name' }, user.email), icon.chevron());
+  const menu = h('div', { class: 'acct__menu', role: 'menu', 'aria-labelledby': 'acct-btn', hidden: true },
+    h('div', { class: 'acct__who' }, h('b', {}, user.email), h('span', {}, 'Administrator')),
+    h('a', { role: 'menuitem', href: '/shop/' }, 'View shop'),
+    h('a', { role: 'menuitem', href: '/shop/?preview=open', target: '_blank', rel: 'noopener' }, 'Preview the open shop'),
+    h('a', { role: 'menuitem', href: '/', target: '_blank', rel: 'noopener' }, 'Home page'),
+    h('button', { role: 'menuitem', type: 'button', class: 'acct__out', onclick: () => F.au.signOut(F.auth) }, 'Sign out'));
+  const close = () => { menu.hidden = true; btn.setAttribute('aria-expanded', 'false'); };
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const open = menu.hidden;
+    menu.hidden = !open; btn.setAttribute('aria-expanded', String(open));
+    if (open) menu.querySelector('a').focus();
+  });
+  document.addEventListener('click', (e) => { if (!menu.hidden && !menu.contains(e.target)) close(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !menu.hidden) { close(); btn.focus(); } });
+  return h('div', { class: 'acct-wrap' }, btn, menu);
+}
+
+/* ---- tab navigation: the last finished screen of each tab is shown instantly while a fresh copy loads, and the other tabs are loaded in the background ---- */
+const VIEWS = { overview: viewOverview, orders: viewOrders, products: viewProducts, schedules: viewSchedules, settings: viewSettings };
+const tabCache = {};      // tab id -> { node }
+const gens = {};          // tab id -> counter, so only the newest load of a tab is kept
+let navSeq = 0;
+
+function showPanel(node) {
+  node.id = 'panel'; node.setAttribute('role', 'tabpanel'); node.setAttribute('aria-labelledby', `tab-${tab}`);
+  if (panel !== node) panel.replaceWith(node);
+  panel = node;
+}
+function build(id, prefetch) {
+  const box = h('div', {});
+  if (prefetch) box.dataset.prefetch = '1';
+  const g = (gens[id] = (gens[id] || 0) + 1);
+  return VIEWS[id](box).then(() => { delete box.dataset.prefetch; return { box, g }; });
+}
+function prefetchTabs(except) {
+  const ids = TABS.map(([x]) => x).filter((x) => x !== except);
+  let i = 0;
+  const next = () => {
+    if (i >= ids.length) return;
+    const id = ids[i++];
+    if (tabCache[id]) { next(); return; }
+    build(id, true).then(({ box, g }) => { if (g === gens[id] && !tabCache[id]) tabCache[id] = { node: box }; }).catch(() => {}).finally(() => setTimeout(next, 250));
+  };
+  setTimeout(next, 400);
+}
+function go(id, focus, initial, useCache = false) {
   tab = id;
+  const mine = ++navSeq;
   $$tabs().forEach((b) => { const on = b.id === `tab-${id}`; b.setAttribute('aria-selected', String(on)); b.tabIndex = on ? 0 : -1; if (on && focus) b.focus(); });
-  // each navigation gets a fresh panel: a slow view that finishes late writes into a detached node instead of the current tab
-  const fresh = h('div', { id: 'panel', role: 'tabpanel', 'aria-labelledby': `tab-${id}` }, h('p', { class: 'empty' }, 'Loading...'));
-  panel.replaceWith(fresh); panel = fresh;
-  const mine = panel;
-  const view = { overview: viewOverview, orders: viewOrders, products: viewProducts, schedules: viewSchedules, settings: viewSettings }[id];
-  view().catch((e) => { clear(mine).append(h('div', { class: 'notice notice--error', role: 'alert' }, 'Could not load this section: ' + e.message)); console.error(e); });
+  const cached = useCache ? tabCache[id] : null;
+  if (!useCache) delete tabCache[id];
+  showPanel(cached ? cached.node : h('div', {}, loaderBlock()));
+  if (cached && id === 'settings') return;                  // a form: leave exactly what is on screen
+  build(id).then(({ box, g }) => {
+    if (g !== gens[id]) return;                              // a newer load of this tab exists
+    tabCache[id] = { node: box };
+    if (mine === navSeq) showPanel(box);
+    if (initial) prefetchTabs(id);
+  }).catch((e) => {
+    console.error(e);
+    if (!cached && mine === navSeq) showPanel(h('div', {}, h('div', { class: 'notice notice--error', role: 'alert' }, 'Could not load this section: ' + e.message)));
+  });
 }
 const $$tabs = () => [...document.querySelectorAll('.tabs [role=tab]')];
 
@@ -143,8 +205,8 @@ function localStatus(rows) {
   return { open: !!cur, closesAtMillis: cur ? cur.closes : null, nextOpensAtMillis: cur ? null : (nxt ? nxt.opens : null), serverNowMillis: t };
 }
 
-async function viewOverview() {
-  const { db, fs } = F; const out = panel;
+async function viewOverview(out) {
+  const { db, fs } = F;
   const [products, recent, scheds, all, failedSnap] = await Promise.all([
     loadProducts(true),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(8))),
@@ -269,8 +331,8 @@ function ordersTable(orders, onOpen) {
       h('td', {}, h('button', { class: 'linkbtn', type: 'button', onclick: (e) => { e.stopPropagation(); open(o); } }, 'Open', h('span', { class: 'sr-only' }, ` ${o.orderNumber}`))))))));
 }
 
-async function viewOrders() {
-  const { db, fs } = F; const out = panel;
+async function viewOrders(out) {
+  const { db, fs } = F;
   const state = { status: '', pay: '', q: '', rows: [], last: null, done: false };
   const list = h('div', {});
   const more = h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => fetchPage(true) }, 'Load more');
@@ -317,7 +379,7 @@ async function viewOrders() {
     h('p', { class: 'fine', id: 'o-help', style: 'margin-bottom:1rem' }, 'Search filters the orders loaded below. Payment is never collected on the website: open an order and tick Paid once you receive cash, Venmo or Zelle.'),
     h('section', { class: 'panel' }, list, h('div', { style: 'margin-top:1rem' }, more)));
   await fetchPage(false);
-  if (location.hash.startsWith('#order=')) {
+  if (!out.dataset.prefetch && location.hash.startsWith('#order=')) {
     const id = location.hash.slice(7);
     const snap = await fs.getDoc(fs.doc(db, 'orders', id)).catch(() => null);
     if (snap && snap.exists()) safeOpen(snapOrder(snap));
@@ -416,8 +478,7 @@ function ensureDialog(id) {
 
 /* ============================== products ============================== */
 
-async function viewProducts() {
-  const out = panel;
+async function viewProducts(out) {
   const products = await loadProducts(true);
   clear(out).append(
     h('div', { class: 'toolbar' }, h('button', { class: 'btn btn--primary btn--sm', type: 'button', onclick: () => editProduct(null) }, 'New product')),
@@ -571,8 +632,8 @@ function editProduct(existing) {
 
 /* ============================== schedules ============================== */
 
-async function viewSchedules() {
-  const { db, fs } = F; const out = panel;
+async function viewSchedules(out) {
+  const { db, fs } = F;
   const snap = await fs.getDocs(fs.query(fs.collection(db, 'storeSchedules'), fs.orderBy('opensAt', 'desc')));
   const rows = snap.docs.map((d) => ({ id: d.id, ...d.data(), opens: ms(d.data().opensAt), closes: ms(d.data().closesAt) }));
   const status = localStatus(rows);
@@ -582,10 +643,11 @@ async function viewSchedules() {
   clear(out).append(
     h('div', { class: 'cards' }, h('div', { class: 'card2' }, h('h3', {}, 'Right now'), h('p', { class: 'big' }, status.open ? 'Open' : 'Closed'), h('p', { class: 'fine', style: 'margin-top:.5rem' }, status.open ? `Closes ${fmtNY(status.closesAtMillis)}` : (status.nextOpensAtMillis ? `Next opening ${fmtNY(status.nextOpensAtMillis, { year: true })}` : 'No upcoming schedule. The shop stays closed.')))),
     h('p', { class: 'notice', style: 'margin-bottom:1rem' }, h('strong', {}, 'All times are New York time (Eastern, daylight-saving aware).'), ' The shop is open when opening time ≤ now < closing time. Active schedules cannot overlap. Changes apply immediately; no redeploy needed.'),
-    h('section', { class: 'panel', 'aria-labelledby': 'prev-h' }, h('h2', { id: 'prev-h' }, 'Preview the closed shop'),
-      h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'See exactly what visitors see when the shop is closed. Opens in a new tab; nothing is changed and no real data is used.'),
+    h('section', { class: 'panel', 'aria-labelledby': 'prev-h' }, h('h2', { id: 'prev-h' }, 'Preview the shop'),
+      h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'See the shop the way visitors do. Opens in a new tab; nothing is changed and no order can be placed from a preview.'),
       h('div', { class: 'row-actions' },
-        h('a', { class: 'btn btn--ghost btn--sm', href: '/shop/?preview=closed', target: '_blank', rel: 'noopener' }, 'Closed, with countdown to a drop'),
+        h('a', { class: 'btn btn--primary btn--sm', href: '/shop/?preview=open', target: '_blank', rel: 'noopener' }, 'Preview the open shop'),
+        h('a', { class: 'btn btn--ghost btn--sm', href: '/shop/?preview=closed', target: '_blank', rel: 'noopener' }, 'Closed, with countdown'),
         h('a', { class: 'btn btn--ghost btn--sm', href: '/shop/?preview=closed-none', target: '_blank', rel: 'noopener' }, 'Closed, no drop scheduled'))),
     h('div', { class: 'toolbar' }, h('button', { class: 'btn btn--primary btn--sm', type: 'button', onclick: () => editSchedule(null) }, 'New schedule')),
     h('section', { class: 'panel' }, h('h2', {}, 'Schedules'),
@@ -622,11 +684,11 @@ function editSchedule(s) {
 
 /* ============================== settings ============================== */
 
-async function viewSettings() {
-  const { db, fs } = F; const out = panel;
+async function viewSettings(out) {
+  const { db, fs } = F;
   const snap = await fs.getDoc(fs.doc(db, 'settings', 'public'));
-  const adminsHolder = h('div', {}, h('section', { class: 'panel' }, h('h2', {}, 'Administrators'), h('p', { class: 'empty' }, 'Loading administrators...')));
-  const mailHolder = h('div', {}, h('section', { class: 'panel' }, h('h2', {}, 'Email (Make.com)'), h('p', { class: 'empty' }, 'Loading email settings...')));
+  const adminsHolder = h('div', {}, h('section', { class: 'panel' }, h('h2', {}, 'Administrators'), loaderBlock('Loading administrators…')));
+  const mailHolder = h('div', {}, h('section', { class: 'panel' }, h('h2', {}, 'Email (Make.com)'), loaderBlock('Loading email settings…')));
   const cur = snap.exists() ? snap.data() : { fulfillmentMethods: [], checkoutNotice: '' };
   const methods = (cur.fulfillmentMethods || []).map((x) => ({ ...x }));
   const box = h('div', {});

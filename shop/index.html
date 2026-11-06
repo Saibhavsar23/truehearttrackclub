@@ -40,15 +40,15 @@
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="preview-bar" id="preview-bar" hidden><strong>Preview only.</strong> <span id="preview-text"></span> <a href="/admin/">Back to admin</a> <a href="/shop/">Exit preview</a></div>
-<div class="announce" id="announce" hidden role="status"><span id="announce-text"></span></div>
 
-<header class="site-header">
+<!-- Same header as the home page -->
+<header class="site-header" id="top">
   <div class="wrap bar">
-    <a class="brand" href="/" aria-label="True Heart Track Club home">
+    <a class="brand" href="/" aria-label="True Heart Track Club, home">
       <span class="logo" role="img" aria-label="True Heart Track Club logo"></span>
       <span class="brand__txt">True Heart<span class="brand__sub"> Track Club</span></span>
     </a>
+
     <nav class="nav" aria-label="Primary">
       <ul>
         <li><a href="/">Home</a></li>
@@ -58,23 +58,41 @@
         <li><a href="/shop/" aria-current="page">Shop</a></li>
       </ul>
     </nav>
-    <div class="bar__right">
-      <nav class="minilinks" aria-label="Site"><a href="/">Home</a></nav>
-      <button class="cartbtn" id="cart-open" type="button" aria-haspopup="dialog" aria-label="Open cart, 0 items">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8h12l1 12H5L6 8zM9 8V6a3 3 0 0 1 6 0v2"/></svg>
-        <span class="cartbtn__count" id="cart-count" hidden aria-hidden="true">0</span>
-      </button>
-    </div>
+    <button class="cartbtn" id="cart-open" type="button" aria-haspopup="dialog" aria-label="Open cart, 0 items">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8h12l1 12H5L6 8zM9 8V6a3 3 0 0 1 6 0v2"/></svg>
+      <span class="cartbtn__count" id="cart-count" hidden aria-hidden="true">0</span>
+    </button>
+    <a class="btn btn--primary btn--sm nav__ig" href="https://www.instagram.com/truehearttrackclub/" target="_blank" rel="noopener">Follow on Instagram</a>
+
+    <button class="burger" type="button" aria-expanded="false" aria-controls="menu" aria-label="Open menu">
+      <span></span><span></span><span></span>
+    </button>
   </div>
 </header>
+
+<!-- Mobile menu (same as home) -->
+<div class="menu" id="menu" aria-hidden="true">
+  <nav aria-label="Mobile">
+    <ul>
+      <li><a href="/"><span>01</span>Home</a></li>
+      <li><a href="/#about"><span>02</span>About</a></li>
+      <li><a href="/#what-we-do"><span>03</span>What We Do</a></li>
+      <li><a href="/#follow"><span>04</span>Follow</a></li>
+      <li><a href="/shop/" aria-current="true"><span>05</span>Shop</a></li>
+    </ul>
+  </nav>
+  <a class="btn btn--primary" href="https://www.instagram.com/truehearttrackclub/" target="_blank" rel="noopener">Follow on Instagram</a>
+  <p class="menu__mail">Inquiries: <a href="mailto:truehearttrackclub@gmail.com">truehearttrackclub@gmail.com</a></p>
+</div>
+
+<div class="announce" id="announce" role="status"><span class="loader loader--sm" aria-hidden="true"></span><span id="announce-text">Checking if the shop is open…</span></div>
 
 <main id="main" tabindex="-1">
   <section class="shop-hero" aria-labelledby="shop-h">
     <div class="wrap">
       <p class="kicker">Official merch</p>
       <h1 class="h2" id="shop-h">The Shop</h1>
-      <p class="lede">Limited drops from the runners behind True Heart. Every drop is a pre-order: the shop is open for a set window, then we order and make exactly what was requested. No online payment: you submit an order, and we arrange payment and delivery with you directly.</p>
-      <p id="status-chip" class="status-chip" hidden></p>
+      <p class="lede">Limited pre-order drops from the runners behind True Heart. The shop opens for a short window, then everything is made to order.</p>
     </div>
   </section>
 
@@ -89,10 +107,13 @@
   <div class="wrap">
     <div id="confirmation" hidden></div>
     <div id="stage" aria-busy="true">
+      <div class="loadwrap"><span class="loader" aria-hidden="true"></span><p class="fine">Loading the shop…</p></div>
       <noscript><div class="state"><h2 class="h2">JavaScript needed</h2><p class="lede">The shop needs JavaScript to run. Questions? Email truehearttrackclub@gmail.com.</p></div></noscript>
     </div>
   </div>
 </main>
+
+<div class="preview-bar" id="preview-bar" hidden><strong>Preview only.</strong> <span id="preview-text"></span> <a href="/admin/">Back to admin</a> <a href="/shop/">Exit preview</a></div>
 
 <!-- Product details -->
 <dialog id="pdp" class="sheet" aria-labelledby="pdp-title"></dialog>
@@ -110,24 +131,29 @@
 <!-- Checkout -->
 <dialog id="checkout" class="sheet" aria-labelledby="co-title"></dialog>
 
+<!-- Same footer as the home page -->
 <footer class="footer">
   <div class="wrap footer__grid">
-    <a class="brand" href="/" aria-label="True Heart Track Club home">
-      <span class="logo" role="img" aria-label="True Heart Track Club logo" style="width:52px;border-radius:3px"></span>
+    <a class="brand" href="/" aria-label="True Heart Track Club, home">
+      <span class="logo" role="img" aria-label="True Heart Track Club logo"></span>
       <span class="brand__txt">True Heart<span class="brand__sub"> Track Club</span></span>
     </a>
     <nav aria-label="Footer">
       <ul>
         <li><a href="/#about">About</a></li>
+        <li><a href="/#what-we-do">What We Do</a></li>
         <li><a href="/#follow">Follow</a></li>
+        <li><a href="/shop/">Shop</a></li>
         <li><a href="https://www.instagram.com/truehearttrackclub/" target="_blank" rel="noopener">Instagram</a></li>
+        <li><a href="https://www.tiktok.com/@truehearttrackclub" target="_blank" rel="noopener">TikTok</a></li>
         <li><a href="mailto:truehearttrackclub@gmail.com">Email</a></li>
       </ul>
     </nav>
-    <small>&copy; <span id="yr">2026</span> True Heart Track Club. A runner-created media brand based around New Jersey high-school running. Not an official school organization. Orders are requests: no payment is taken on this website. All times on this page are Eastern Time.</small>
+    <small>&copy; <span id="yr">2026</span> True Heart Track Club. A runner-created media brand based around New Jersey high-school running. Not an official school organization. Orders are requests: no payment is taken on this website. Times on the shop are Eastern Time.</small>
   </div>
 </footer>
 
+<script src="/assets/js/chrome.js" defer></script>
 <script type="module" src="/assets/js/shop.js"></script>
 </body>
 </html>

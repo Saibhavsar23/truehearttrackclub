@@ -59,6 +59,7 @@ export function toast(msg) {
 export const icon = {
   bag: () => svg('M6 8h12l1 12H5L6 8zM9 8V6a3 3 0 0 1 6 0v2'),
   close: () => svg('M5 5l14 14M19 5L5 19'),
+  chevron: () => svg('M6 9l6 6 6-6'),
   shirt: () => svg('M8 4l-5 3 2 4 3-1v10h8V10l3 1 2-4-5-3a4 4 0 0 1-8 0z'),
 };
 function svg(d) {

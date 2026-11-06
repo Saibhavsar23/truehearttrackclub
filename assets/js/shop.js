@@ -3,7 +3,7 @@ import { money, fmtNY, h, $, clear, announce, toast, icon } from './common.js';
 import * as Cart from './cart.js';
 
 const stage = $('#stage');
-const chip = $('#status-chip');
+const chip = $('#status-chip') || document.createElement('p');   // the status now lives in the announcement bar; this stays a harmless stand-in
 const cartDlg = $('#cart');
 const pdpDlg = $('#pdp');
 const coDlg = $('#checkout');
@@ -110,7 +110,7 @@ function reconcileCart() {
 
 /* ---- announcement bar, closed-shop preview, instant paint from the last visit ---- */
 
-const PREVIEW = (() => { const v = new URLSearchParams(location.search).get('preview'); return v === 'closed' || v === 'closed-none' ? v : null; })();
+const PREVIEW = (() => { const v = new URLSearchParams(location.search).get('preview'); return v === 'open' || v === 'closed' || v === 'closed-none' ? v : null; })();
 const barEl = $('#announce');
 const barText = $('#announce-text');
 const fmtDur = (ms) => {
@@ -125,6 +125,7 @@ const fmtDur = (ms) => {
 function paintBar() {
   if (!S.status) return;
   barEl.hidden = false;
+  const ld = barEl.querySelector('.loader'); if (ld) ld.remove();          // the first real answer replaces the "checking" spinner
   barEl.classList.toggle('announce--closed', !S.status.open);
   const t = now();
   if (S.status.open) barText.textContent = S.status.closesAtMillis ? `Pre-order drop is open · closes in ${fmtDur(S.status.closesAtMillis - t)}` : 'Pre-order drop is open';
@@ -147,18 +148,26 @@ function paintFromCache() {
 function saveCache() { try { localStorage.setItem(CACHE_KEY, JSON.stringify({ t: Date.now(), status: S.status, catalog: S.catalog, settings: S.settings })); } catch (_) {} }
 function clearCache() { try { localStorage.removeItem(CACHE_KEY); } catch (_) {} }
 
-/** ?preview=closed shows the closed shop exactly as visitors see it, without touching real data. For the admin's eyes. */
-function startPreview() {
+/** ?preview=open | closed | closed-none: the shop as visitors see it, for the admin's eyes. Orders cannot be placed from a preview. */
+async function startPreview() {
   const t = Date.now();
-  S.skew = 0;
-  S.status = PREVIEW === 'closed'
-    ? { open: false, scheduleName: 'Sample drop', closesAtMillis: null, nextOpensAtMillis: t + (3 * 24 + 5) * 3600e3 + 27 * 60e3, serverNowMillis: t }
-    : { open: false, scheduleName: null, closesAtMillis: null, nextOpensAtMillis: null, serverNowMillis: t };
+  S.skew = 0; S.preview = true;
   $('#preview-bar').hidden = false;
-  $('#preview-text').textContent = PREVIEW === 'closed'
-    ? 'This is what visitors see when the shop is closed and a drop is scheduled (the date is a sample).'
-    : 'This is what visitors see when the shop is closed and no drop is scheduled.';
-  showStage();
+  if (PREVIEW === 'open') {
+    $('#preview-text').textContent = 'This is how the shop looks while it is open, with your real products. Checkout is switched off in this preview.';
+    S.status = { open: true, scheduleName: 'Preview', closesAtMillis: t + 7 * 864e5, nextOpensAtMillis: null, serverNowMillis: t };
+    if (!isConfigured) { renderNotConfigured(); return; }
+    renderLoading();
+    try { await loadCatalog(); showStage(); } catch (e) { renderError(e, startPreview); return; }
+  } else {
+    S.status = PREVIEW === 'closed'
+      ? { open: false, scheduleName: 'Sample drop', closesAtMillis: null, nextOpensAtMillis: t + (3 * 24 + 5) * 3600e3 + 27 * 60e3, serverNowMillis: t }
+      : { open: false, scheduleName: null, closesAtMillis: null, nextOpensAtMillis: null, serverNowMillis: t };
+    $('#preview-text').textContent = PREVIEW === 'closed'
+      ? 'This is what visitors see when the shop is closed and a drop is scheduled (the date is a sample).'
+      : 'This is what visitors see when the shop is closed and no drop is scheduled.';
+    showStage();
+  }
   setInterval(() => { tickCountdown(); paintBar(); }, 1000);
 }
 
@@ -176,6 +185,7 @@ function renderLoading() {
   stage.setAttribute('aria-busy', 'true');
   clear(stage).append(
     h('p', { class: 'sr-only' }, 'Loading the shop'),
+    h('div', { class: 'loadwrap' }, h('span', { class: 'loader', 'aria-hidden': 'true' }), h('p', { class: 'fine' }, 'Loading the shop…')),
     h('div', { class: 'catalog' }, h('div', { class: 'grid', 'aria-hidden': 'true' }, [0, 1, 2, 3].map(() => h('div', {}, h('div', { class: 'skeleton', style: 'aspect-ratio:4/5' }), h('div', { class: 'skeleton', style: 'height:16px;margin-top:12px;width:70%' }), h('div', { class: 'skeleton', style: 'height:14px;margin-top:8px;width:30%' }))))),
   );
 }
@@ -411,11 +421,13 @@ function renderCart() {
   }
   const blocked = [...S.notes.values()].some((n) => n.bad);
   const closed = S.status && !S.status.open;
+  const previewing = S.preview === true;
   foot.append(...[
     h('div', { class: 'totals' }, h('span', {}, 'Subtotal'), h('span', {}, money(Cart.cartSubtotal(cart)))),
     h('p', { class: 'fine' }, 'No payment is collected online. You review everything before submitting.'),
     closed ? h('p', { class: 'alert alert--bad', role: 'alert' }, 'The shop is closed, so orders cannot be submitted right now.') : null,
-    h('button', { class: 'btn btn--primary btn--block', type: 'button', disabled: blocked || closed, onclick: startCheckout }, 'Review & check out'),
+    previewing && !closed ? h('p', { class: 'alert', role: 'status' }, 'Checkout is switched off in this preview.') : null,
+    h('button', { class: 'btn btn--primary btn--block', type: 'button', disabled: blocked || closed || previewing, onclick: startCheckout }, 'Review & check out'),
     h('button', { class: 'btn btn--ghost btn--block', type: 'button', 'data-close': '' }, 'Continue shopping'),
   ].filter(Boolean));
   if (fid) {
@@ -645,7 +657,6 @@ async function init() {
     renderError(e, init);
     return;
   }
-  if (useEmulator) chip.append(' (emulator)');
 
   setInterval(() => {
     tickCountdown();
