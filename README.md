@@ -248,3 +248,20 @@ Local header test: `node scripts/serve-with-headers.js` serves the site with the
   a cold start. This costs a few dollars a month; remove those two options to stop it.
 * Admin > Schedules > "Preview the closed shop" opens `/shop/?preview=closed` (or `closed-none`): the closed page as visitors see it,
   using no real data.
+
+## Deleting things (Nov 2026)
+* **Orders:** open an order > *Move to Trash*. It leaves every list and total, can be restored from Orders > Trash for 30 days, then a nightly job erases it.
+  A paid order cannot be trashed (refund, set Not paid, then trash). Cancel an order instead if the customer should be emailed.
+* **Products:** *Delete* archives the product (hidden from the shop, restorable). Under *Archived products* you can *Restore* it or *Delete forever*.
+  Orders already placed keep their own copy of the product details, so neither action changes an order.
+* **Exports:** Orders > *Export all as CSV*, and Overview > What to order > *Download as CSV*.
+* **Drop checklist:** the top of the Overview shows what still needs doing before a drop (products, photos, schedule, email, pickup/delivery info).
+
+## Before each drop: owner checklist
+1. Overview > the checklist is all green (products with photos and sizes, a scheduled drop, email connected, pickup/delivery text).
+2. Place one real test order with your own email, confirm the emails arrive, then move that test order to the Trash.
+3. Make.com: check your plan's monthly operations (each order sends about 3 emails). Keep the scenario ON and set to run immediately.
+4. Firebase console > Firestore > Disaster recovery: turn on scheduled backups or point-in-time recovery.
+5. Google Cloud > Billing > Budgets & alerts: set a small alert. Firebase > Functions > watch the *Health* tab on opening day.
+6. Announce the opening time in Eastern Time; the shop opens and closes on the server's clock, not the visitor's.
+7. After it closes: Overview > What to order > Download as CSV, then place the supplier order. Mark orders Delivered as they go out.

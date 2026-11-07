@@ -321,20 +321,126 @@ test('one email address cannot place more than 10 orders a day', async () => {
   assert.deepEqual(results.slice(10), ['resource-exhausted', 'resource-exhausted']);
 });
 
-test('an order can be deleted completely, together with its email records; nothing else is touched', async () => {
+test('Trash: a paid order is refused, a trashed order is hidden from changes, unsent emails are skipped, and it can be restored', async () => {
+  const { orderId } = await placeOrder();
+  const mailBefore = (await db.collection('mail').where('orderId', '==', orderId).get()).docs.map((d) => d.data().status);
+  assert.ok(mailBefore.includes('pending'));
+  // a paid order cannot be thrown away until it is marked not paid
+  await svc.adminSetOrderPayment(db, 'u', orderId, { paid: true, method: 'cash' });
+  await assert.rejects(svc.adminTrashOrder(db, 'u', orderId), (e) => e.code === 'failed-precondition' && /marked paid/.test(e.message));
+  await svc.adminSetOrderPayment(db, 'u', orderId, { paid: false });
+  const r = await svc.adminTrashOrder(db, 'u', orderId, () => 1700000000000);
+  assert.equal(r.purgeAtMillis, 1700000000000 + 30 * 24 * 3600 * 1000);
+  const o = (await db.doc(`orders/${orderId}`).get()).data();
+  assert.equal(o.deletedMillis, 1700000000000);
+  assert.equal(o.status, 'ordered');                                    // nothing about the order itself changed
+  // unsent emails will never go out; sent/failed ones keep their state
+  const mails = (await db.collection('mail').where('orderId', '==', orderId).get()).docs.map((d) => d.data().status);
+  assert.ok(mails.every((s) => s === 'skipped'));
+  assert.deepEqual(await M.processMail(db, (await db.collection('mail').where('orderId', '==', orderId).get()).docs[0].id, async () => { throw new Error('must not send'); }), { skipped: true });
+  // while in the Trash it cannot be edited, trashed twice, or hard-deleted without being there
+  await assert.rejects(svc.adminTrashOrder(db, 'u', orderId), (e) => e.code === 'failed-precondition');
+  await assert.rejects(svc.adminUpdateOrderStatus(db, 'u', orderId, 'delivered'), (e) => e.code === 'failed-precondition' && /Trash/.test(e.message));
+  await assert.rejects(svc.adminSetOrderPayment(db, 'u', orderId, { paid: true, method: 'cash' }), (e) => e.code === 'failed-precondition' && /Trash/.test(e.message));
+  // restore
+  await svc.adminRestoreOrder(db, orderId);
+  assert.equal((await db.doc(`orders/${orderId}`).get()).data().deletedMillis, null);
+  await assert.rejects(svc.adminRestoreOrder(db, orderId), (e) => e.code === 'failed-precondition');
+  await svc.adminUpdateOrderStatus(db, 'u', orderId, 'delivered');      // works again
+});
+
+test('Delete forever needs the Trash first; it erases the order, its email records and its duplicate-protection record, and nothing else', async () => {
   const { orderId, pid } = await placeOrder();
   await svc.submitOrder(db, orderReq(pid, M_BLACK, 1), ctx({ ip: '4.4.4.4' }));       // a second order that must survive
   assert.equal((await db.collection('orders').get()).size, 2);
+  await assert.rejects(svc.adminDeleteOrder(db, orderId), (e) => e.code === 'failed-precondition' && /Trash/.test(e.message));
   assert.ok((await db.collection('idempotency').where('orderId', '==', orderId).get()).size === 1);
+  await svc.adminTrashOrder(db, 'u', orderId);
   const out = await svc.adminDeleteOrder(db, orderId);
   assert.equal(out.deleted, true);
-  assert.equal((await db.collection('idempotency').where('orderId', '==', orderId).get()).size, 0);
   assert.equal((await db.doc(`orders/${orderId}`).get()).exists, false);
   assert.equal((await db.collection('mail').where('orderId', '==', orderId).get()).size, 0);
+  assert.equal((await db.collection('idempotency').where('orderId', '==', orderId).get()).size, 0);
   assert.equal((await db.collection('orders').get()).size, 1);
   assert.equal((await db.collection('mail').get()).size, 2);
   await assert.rejects(svc.adminDeleteOrder(db, orderId), (e) => e.code === 'not-found');
   await assert.rejects(svc.adminDeleteOrder(db, '../x'), (e) => e.code === 'invalid-argument');
+});
+
+test('the nightly clean-up erases only orders that have been in the Trash for 30 days', async () => {
+  const { orderId, pid } = await placeOrder();
+  const second = await svc.submitOrder(db, orderReq(pid, M_BLACK, 1), ctx({ ip: '6.6.6.6' }));
+  const id2 = (await db.collection('orders').where('orderNumber', '==', second.orderNumber).get()).docs[0].id;
+  const day = 24 * 3600 * 1000; const base = 1800000000000;
+  await svc.adminTrashOrder(db, 'u', orderId, () => base);                    // trashed 31 days before the sweep
+  await svc.adminTrashOrder(db, 'u', id2, () => base + 5 * day);              // trashed 26 days before the sweep
+  const r = await svc.purgeTrash(db, base + 31 * day);
+  assert.equal(r.purged, 1);
+  assert.equal((await db.doc(`orders/${orderId}`).get()).exists, false);
+  assert.equal((await db.doc(`orders/${id2}`).get()).exists, true);
+  assert.equal((await svc.purgeTrash(db, base + 31 * day)).purged, 0);
+});
+
+test('products: impact is counted, archive hides and is reversible, restore keeps it hidden, delete forever needs the archive, orders keep their details', async () => {
+  await openSchedule();
+  const pid = await makeProduct();
+  const other = await makeProduct({ name: 'Other Cap' });
+  await svc.submitOrder(db, orderReq(pid, M_BLACK, 3), ctx());
+  const second = await svc.submitOrder(db, orderReq(pid, 'l__black', 2), ctx({ ip: '8.8.8.8' }));
+  const id2 = (await db.collection('orders').where('orderNumber', '==', second.orderNumber).get()).docs[0].id;
+  await svc.adminUpdateOrderStatus(db, 'u', id2, 'delivered');
+  let imp = await svc.productImpact(db, pid);
+  assert.deepEqual(imp, { orders: 2, notDelivered: 1, units: 5, trashed: 0 });
+  assert.deepEqual(await svc.productImpact(db, other), { orders: 0, notDelivered: 0, units: 0, trashed: 0 });
+  // delete forever is refused until the product is archived
+  await assert.rejects(svc.adminPurgeProduct(db, pid, null), (e) => e.code === 'failed-precondition');
+  await svc.adminArchiveProduct(db, 'u', pid);
+  let p = (await db.doc(`products/${pid}`).get()).data();
+  assert.equal(p.active, false); assert.ok(p.archivedAt);
+  // an archived product can no longer be ordered
+  await assert.rejects(svc.submitOrder(db, orderReq(pid, M_BLACK, 1), ctx({ ip: '9.9.9.9' })), (e) => e.code === 'failed-precondition' && e.details.problems[0].reason === 'product_unavailable');
+  // restore brings it back hidden; saving it as active also unarchives it
+  await svc.adminRestoreProduct(db, 'u', pid);
+  p = (await db.doc(`products/${pid}`).get()).data();
+  assert.equal(p.archivedAt, null); assert.equal(p.active, false);
+  await svc.adminArchiveProduct(db, 'u', pid);
+  await svc.adminSaveProduct(db, 'u', { id: pid, name: 'Team Hoodie', description: '', priceCents: 4500, active: true, images: [], variants: [{ size: 'M', color: 'Black' }] });
+  assert.equal((await db.doc(`products/${pid}`).get()).data().archivedAt, null);
+  // delete forever: product, variants gone; the orders still read perfectly
+  await svc.adminArchiveProduct(db, 'u', pid);
+  const removed = [];
+  await svc.adminPurgeProduct(db, pid, { deletePrefix: async (x) => removed.push(x) });
+  assert.deepEqual(removed, [`products/${pid}/`]);
+  assert.equal((await db.doc(`products/${pid}`).get()).exists, false);
+  assert.equal((await db.collection(`products/${pid}/variants`).get()).size, 0);
+  const orders = (await db.collection('orders').get()).docs.map((d) => d.data());
+  assert.equal(orders.length, 2);
+  assert.ok(orders.every((o) => o.items[0].productName === 'Team Hoodie' && o.items[0].unitPriceCents === 4500 && o.subtotalCents > 0));
+  assert.equal((await db.doc(`products/${other}`).get()).exists, true);          // nothing else was touched
+  await assert.rejects(svc.adminArchiveProduct(db, 'u', pid), (e) => e.code === 'not-found');
+});
+
+test('photos taken off a product are removed from storage; photos still used are kept', async () => {
+  const pid = await makeProduct();
+  const mkImg = (n) => ({ url: `https://firebasestorage.googleapis.com/v0/b/x/o/${n}.webp`, path: `products/${pid}/${n}.webp`, thumbUrl: `https://firebasestorage.googleapis.com/v0/b/x/o/${n}-t.webp`, thumbPath: `products/${pid}/${n}-t.webp`, alt: '' });
+  const save = (images, storage) => svc.adminSaveProduct(db, 'u', { id: pid, name: 'Team Hoodie', description: '', priceCents: 4500, active: true, images, variants: [{ size: 'M', color: 'Black' }] }, storage);
+  await save([mkImg('a'), mkImg('b')], null);
+  const deleted = [];
+  await save([mkImg('b')], { deleteFiles: async (paths) => deleted.push(...paths) });
+  assert.deepEqual(deleted.sort(), [`products/${pid}/a-t.webp`, `products/${pid}/a.webp`]);
+});
+
+test('a busy drop: 30 customers submitting at the same moment all get an order, with unique numbers', async () => {
+  await openSchedule();
+  const pid = await makeProduct();
+  const results = await Promise.all(Array.from({ length: 30 }, (_, i) => {
+    const req = orderReq(pid, M_BLACK, 1);
+    req.customer.email = `rush${i}@example.com`;
+    return svc.submitOrder(db, req, ctx({ ip: `20.0.0.${i}` })).then((r) => r.orderNumber, (e) => e.code);
+  }));
+  assert.equal(new Set(results).size, 30, JSON.stringify(results.filter((r) => !/^THTC-/.test(r))));
+  assert.ok(results.every((r) => /^THTC-\d{5}$/.test(r)));
+  assert.equal((await db.collection('orders').get()).size, 30);
 });
 
 /* --------------------------------- mail queue --------------------------------- */

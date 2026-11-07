@@ -119,7 +119,7 @@ async function adminSaveSettings(db, uid, data) {
 
 /* --------------------------------- products -------------------------------- */
 
-async function adminSaveProduct(db, uid, raw) {
+async function adminSaveProduct(db, uid, raw, storage) {
   const p = L.validateProductInput(raw);
   let id = raw.id;
   if (id !== undefined && id !== null && !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new HttpError('invalid-argument', 'Invalid product id.');
@@ -129,7 +129,7 @@ async function adminSaveProduct(db, uid, raw) {
   for (const v of p.variants) if (!/^[a-z0-9][a-z0-9-]*__[a-z0-9][a-z0-9-]*$/.test(v.id)) throw new HttpError('invalid-argument', `Size and color must contain letters or numbers (${v.size} / ${v.color}).`);
   if (p.active && p.variants.filter((v) => v.active).length === 0) throw new HttpError('invalid-argument', 'Add at least one active size/color variant before activating a product.');
 
-  return db.runTransaction(async (tx) => {
+  const result = await db.runTransaction(async (tx) => {
     const [psnap, vsnap] = await Promise.all([tx.get(pref), tx.get(pref.collection('variants'))]);
     const now = FieldValue.serverTimestamp();
     const newIds = new Set(p.variants.map((v) => v.id));
@@ -143,6 +143,8 @@ async function adminSaveProduct(db, uid, raw) {
       // a copy of the active sizes/colors lives on the product itself, so the shop needs ONE read instead of one per product
       variants: p.variants.filter((v) => v.active).map((v) => ({ id: v.id, size: v.size, color: v.color, sku: v.sku })),
       active: p.active,
+      // saving a product as active brings it back from the archive
+      archivedAt: (psnap.exists && !p.active && psnap.data().archivedAt) ? psnap.data().archivedAt : null,
       featured: p.featured,
       createdAt: psnap.exists ? psnap.data().createdAt : now,
       updatedAt: now,
@@ -157,8 +159,13 @@ async function adminSaveProduct(db, uid, raw) {
     for (const d of vsnap.docs) {
       if (!newIds.has(d.id) && d.data().active) tx.update(d.ref, { active: false, updatedAt: now });
     }
-    return { id };
+    const keep = new Set(p.images.flatMap((im) => [im.path, im.thumbPath].filter(Boolean)));
+    const removedPaths = psnap.exists ? (psnap.data().images || []).flatMap((im) => [im.path, im.thumbPath].filter(Boolean)).filter((x) => !keep.has(x)) : [];
+    return { id, removedPaths };
   });
+  // photos taken off the product are deleted from storage too (best effort; never fails the save)
+  if (storage && result.removedPaths.length) await storage.deleteFiles(result.removedPaths);
+  return { id: result.id };
 }
 
 /* ------------------------------ email webhook (Make.com) ------------------------------ */
@@ -313,7 +320,7 @@ async function submitOrder(db, data, ctx) {
     tx.set(counterRef, { next: next + 1 });
     tx.set(idemRef, { payloadHash, response, orderId: orderRef.id, createdAt: nowDate, expireAt: toDate(nowMs + 30 * 24 * 3600 * 1000) });
     return response;
-  });
+  }, { maxAttempts: 25 });   // a busy drop makes many orders fight over the counter; keep retrying instead of failing
 }
 
 async function adminUpdateOrderStatus(db, uid, orderId, newStatus, now = () => Date.now()) {
@@ -324,6 +331,7 @@ async function adminUpdateOrderStatus(db, uid, orderId, newStatus, now = () => D
     const snap = await tx.get(ref);
     if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
     const o = snap.data();
+    if (o.deletedMillis) throw new HttpError('failed-precondition', 'This order is in the Trash. Restore it first.');
     const current = L.normalizeStatus(o.status);
     if (!L.canTransition(current, newStatus)) throw new HttpError('failed-precondition', `An order that is "${current}" cannot be changed to "${newStatus}".`);
     if (newStatus === 'cancelled' && o.paid === true) throw new HttpError('failed-precondition', 'This order is marked paid. Refund the customer, change it to Not paid, then cancel it.');
@@ -355,6 +363,7 @@ async function adminSetOrderPayment(db, uid, orderId, data, now = () => Date.now
     const snap = await tx.get(ref);
     if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
     const o = snap.data();
+    if (o.deletedMillis) throw new HttpError('failed-precondition', 'This order is in the Trash. Restore it first.');
     if (data.paid && o.status === 'cancelled') throw new HttpError('failed-precondition', 'A cancelled order cannot be marked paid.');
     const nowMs = now();
     const patch = {
@@ -431,20 +440,134 @@ async function normalizeLegacyOrders(db) {
   return { migrated };
 }
 
-/** Permanently delete an order and its email records. Admin-only (checked by the caller). */
-async function adminDeleteOrder(db, orderId) {
-  if (typeof orderId !== 'string' || !/^[A-Za-z0-9]{10,40}$/.test(orderId)) throw new HttpError('invalid-argument', 'Invalid order id.');
-  const ref = db.collection('orders').doc(orderId);
+/* ------------------------------ deleting things safely ------------------------------ */
+// Orders:   Move to Trash (hidden everywhere, restorable for 30 days) -> deleted for good, by hand or automatically.
+// Products: Archive (hidden from the shop, restorable) -> Delete forever (also removes the photos).
+// Orders keep their own copy of every product detail, so neither action can damage an existing order.
+
+const TRASH_DAYS = 30;
+const TRASH_MS = TRASH_DAYS * 24 * 3600 * 1000;
+const ORDER_ID_RE = /^[A-Za-z0-9]{10,40}$/;
+
+/** How many orders contain a product (trashed ones counted separately). Orders carry their own snapshot, so this is information, not a dependency. */
+async function productImpact(db, productId) {
+  if (typeof productId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(productId)) throw new HttpError('invalid-argument', 'Invalid product id.');
+  const snap = await db.collection('orders').select('items', 'status', 'deletedMillis').get();
+  const out = { orders: 0, notDelivered: 0, units: 0, trashed: 0 };
+  for (const d of snap.docs) {
+    const o = d.data();
+    const lines = (o.items || []).filter((i) => i.productId === productId);
+    if (!lines.length) continue;
+    if (o.deletedMillis) { out.trashed++; continue; }
+    const st = L.normalizeStatus(o.status);
+    out.orders++;
+    if (st === 'ordered') out.notDelivered++;
+    if (st !== 'cancelled') out.units += lines.reduce((n, i) => n + (i.quantity || 0), 0);
+  }
+  return out;
+}
+
+async function adminArchiveProduct(db, uid, id, now = () => Date.now()) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new HttpError('invalid-argument', 'Invalid product id.');
+  const ref = db.collection('products').doc(id);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new HttpError('not-found', 'That product no longer exists.');
+    if (snap.data().archivedAt) return { archived: true };
+    tx.update(ref, { active: false, featured: false, archivedAt: toDate(now()), archivedBy: uid, updatedAt: toDate(now()) });
+    return { archived: true };
+  });
+}
+
+/** Brings an archived product back as HIDDEN: the admin switches it on when ready. */
+async function adminRestoreProduct(db, uid, id, now = () => Date.now()) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new HttpError('invalid-argument', 'Invalid product id.');
+  const ref = db.collection('products').doc(id);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new HttpError('not-found', 'That product no longer exists.');
+    tx.update(ref, { archivedAt: null, archivedBy: null, updatedAt: toDate(now()) });
+    return { restored: true };
+  });
+}
+
+/** Removes an ARCHIVED product, its sizes/colors and its photos for good. Existing orders are untouched. */
+async function adminPurgeProduct(db, id, storage) {
+  if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw new HttpError('invalid-argument', 'Invalid product id.');
+  const ref = db.collection('products').doc(id);
   const snap = await ref.get();
-  if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
-  const mail = await db.collection('mail').where('orderId', '==', orderId).get();
-  const idem = await db.collection('idempotency').where('orderId', '==', orderId).get();   // so a retry can never "succeed" with an order that no longer exists
+  if (!snap.exists) throw new HttpError('not-found', 'That product no longer exists.');
+  if (!snap.data().archivedAt) throw new HttpError('failed-precondition', 'Archive the product first. Only archived products can be deleted for good.');
+  const variants = await ref.collection('variants').get();
+  const legacy = await db.collection('inventory').where('productId', '==', id).get();
+  const batch = db.batch();
+  variants.docs.forEach((d) => batch.delete(d.ref));
+  legacy.docs.forEach((d) => batch.delete(d.ref));
+  batch.delete(ref);
+  await batch.commit();
+  if (storage) await storage.deletePrefix(`products/${id}/`);
+  return { deleted: true };
+}
+
+/** Order -> Trash. Refuses PAID orders (settle the money first), skips emails not yet sent, and can be undone. */
+async function adminTrashOrder(db, uid, orderId, now = () => Date.now()) {
+  if (typeof orderId !== 'string' || !ORDER_ID_RE.test(orderId)) throw new HttpError('invalid-argument', 'Invalid order id.');
+  const ref = db.collection('orders').doc(orderId);
+  const mailQ = db.collection('mail').where('orderId', '==', orderId);
+  return db.runTransaction(async (tx) => {
+    const [snap, mails] = await Promise.all([tx.get(ref), tx.get(mailQ)]);
+    if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
+    const o = snap.data();
+    if (o.deletedMillis) throw new HttpError('failed-precondition', 'This order is already in the Trash.');
+    if (o.paid === true) throw new HttpError('failed-precondition', 'This order is marked paid. Refund the customer and set it to Not paid first, or keep it for your records.');
+    const nowMs = now();
+    tx.update(ref, { deletedMillis: nowMs, deletedByUid: uid, updatedAt: toDate(nowMs) });
+    mails.docs.forEach((d) => { const st = d.data().status; if (st !== 'sent' && st !== 'failed') tx.update(d.ref, { status: 'skipped', updatedAt: toDate(nowMs) }); });
+    return { orderNumber: o.orderNumber, purgeAtMillis: nowMs + TRASH_MS };
+  });
+}
+
+async function adminRestoreOrder(db, orderId, now = () => Date.now()) {
+  if (typeof orderId !== 'string' || !ORDER_ID_RE.test(orderId)) throw new HttpError('invalid-argument', 'Invalid order id.');
+  const ref = db.collection('orders').doc(orderId);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
+    if (!snap.data().deletedMillis) throw new HttpError('failed-precondition', 'This order is not in the Trash.');
+    tx.update(ref, { deletedMillis: null, deletedByUid: null, updatedAt: toDate(now()) });
+    return { orderNumber: snap.data().orderNumber };
+  });
+}
+
+/** Erases an order, its email records and its duplicate-protection record. Used by "Delete forever" and the nightly clean-up. */
+async function hardDeleteOrder(db, orderId) {
+  const ref = db.collection('orders').doc(orderId);
+  const [mail, idem] = await Promise.all([
+    db.collection('mail').where('orderId', '==', orderId).get(),
+    db.collection('idempotency').where('orderId', '==', orderId).get(),
+  ]);
   const batch = db.batch();
   mail.docs.forEach((d) => batch.delete(d.ref));
   idem.docs.forEach((d) => batch.delete(d.ref));
   batch.delete(ref);
   await batch.commit();
+}
+
+/** "Delete forever": only for orders that are already in the Trash. */
+async function adminDeleteOrder(db, orderId) {
+  if (typeof orderId !== 'string' || !ORDER_ID_RE.test(orderId)) throw new HttpError('invalid-argument', 'Invalid order id.');
+  const snap = await db.collection('orders').doc(orderId).get();
+  if (!snap.exists) throw new HttpError('not-found', 'Order not found.');
+  if (!snap.data().deletedMillis) throw new HttpError('failed-precondition', 'Move the order to the Trash first. It can be deleted for good from there.');
+  await hardDeleteOrder(db, orderId);
   return { deleted: true, orderNumber: snap.data().orderNumber };
+}
+
+/** Nightly: orders that have been in the Trash for 30 days are erased. */
+async function purgeTrash(db, nowMs = Date.now()) {
+  const snap = await db.collection('orders').where('deletedMillis', '<', nowMs - TRASH_MS).limit(200).get();
+  for (const d of snap.docs) await hardDeleteOrder(db, d.id);
+  return { purged: snap.size };
 }
 
 async function adminResendMail(db, mailId, now = () => Date.now()) {
@@ -461,6 +584,6 @@ async function adminResendMail(db, mailId, now = () => Date.now()) {
 
 module.exports = {
   RATE, getStoreStatus, adminSaveSchedule, adminDeleteSchedule, getPublicSettings, adminSaveSettings,
-  adminSaveProduct, submitOrder, normalizeLegacyOrders, listAdmins, setAdmin, adminUpdateOrderStatus, adminSetOrderPayment, adminDeleteOrder, adminResendMail, scheduleFromDoc,
+  adminSaveProduct, submitOrder, normalizeLegacyOrders, productImpact, adminArchiveProduct, adminRestoreProduct, adminPurgeProduct, adminTrashOrder, adminRestoreOrder, purgeTrash, TRASH_DAYS, listAdmins, setAdmin, adminUpdateOrderStatus, adminSetOrderPayment, adminDeleteOrder, adminResendMail, scheduleFromDoc,
   getMailWebhook, adminGetMailConfig, adminSaveMailWebhook, adminSendTestMail,
 };

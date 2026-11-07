@@ -82,3 +82,15 @@ table.t td .linkbtn{ min-height:auto; }
 .acct__menu .acct__out{ color:var(--red-hot); }
 .tabs{ scrollbar-width:none; }
 .tabs::-webkit-scrollbar{ display:none; }
+
+/* ---- drop checklist ---- */
+.ready{ display:grid; gap:.1rem; }
+.ready__row{ display:flex; align-items:center; gap:.8rem; min-height:44px; padding:.2rem 0; border-bottom:1px solid var(--line); font-size:.94rem; }
+.ready__row:last-child{ border-bottom:0; }
+.ready__mark{ display:grid; place-items:center; flex:none; width:24px; height:24px; border-radius:50%; font:700 .8rem/1 var(--body); }
+.is-ok .ready__mark{ background:rgba(95,209,138,.18); color:var(--ok); }
+.is-bad .ready__mark{ background:rgba(238,74,78,.2); color:var(--red-hot); }
+.is-tip .ready__mark{ background:rgba(242,184,75,.18); color:var(--warn); }
+.ready__row .linkbtn{ margin-left:auto; }
+/* ---- archived products ---- */
+.archived summary{ cursor:pointer; min-height:44px; display:flex; align-items:center; font:400 1.3rem/1 var(--display); letter-spacing:.05em; text-transform:uppercase; }

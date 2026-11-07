@@ -17,6 +17,22 @@ const cache = { products: null };
 let tab = 'overview';
 let user = null;
 
+/** CSV with spreadsheet-formula protection: a cell that starts like a formula gets a leading apostrophe. */
+const csvCell = (v) => {
+  let s = String(v ?? '');
+  if (/^[=@\t\r]/.test(s) || /^[+-][^0-9\s().]/.test(s)) s = "'" + s;
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+};
+function downloadCsv(name, rows) {
+  const text = rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+  const blob = new Blob(['\ufeff' + text], { type: 'text/csv;charset=utf-8' });
+  const a = h('a', { href: URL.createObjectURL(blob), download: name });
+  document.body.append(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+const todayStamp = () => new Date().toISOString().slice(0, 10);
+const dollars = (cents) => ((cents || 0) / 100).toFixed(2);
+
 const loaderBlock = (text = 'Loading…') => h('div', { class: 'loadwrap', role: 'status' }, h('span', { class: 'loader', 'aria-hidden': 'true' }), h('p', { class: 'fine' }, text));
 const tag = (cls, text) => h('span', { class: `tag tag--${cls}` }, text);
 const ms = (ts) => (ts && ts.toMillis ? ts.toMillis() : null);
@@ -196,6 +212,33 @@ async function loadProducts(force) {
 
 /* ============================== overview ============================== */
 
+/** "Is the next drop ready?" Green ticks, and a Fix button for anything that is not. */
+function readinessPanel(products, scheds, settingsSnap) {
+  const t0 = Date.now();
+  const act = products.filter((p) => p.active && !p.archivedAt);
+  const sch = scheds.docs.map((d) => ({ active: d.data().active === true, opens: ms(d.data().opensAt), closes: ms(d.data().closesAt) })).filter((s) => s.active);
+  const open = sch.some((s) => s.opens <= t0 && t0 < s.closes);
+  const upcoming = sch.some((s) => s.opens > t0);
+  const cfg = settingsSnap && settingsSnap.exists() ? settingsSnap.data() : {};
+  const rows = [
+    { ok: act.length > 0 && act.every((p) => p.variants.length > 0), text: act.length ? 'Every active product has sizes and colors' : 'There are no active products yet', fix: 'products' },
+    { ok: act.length > 0 && act.every((p) => (p.images || []).length > 0), text: 'Every active product has a photo', fix: 'products' },
+    { ok: open || upcoming, text: open ? 'The shop is open right now' : (upcoming ? 'A drop is scheduled' : 'No open or upcoming drop is scheduled'), fix: 'schedules' },
+    { ok: (cfg.fulfillmentMethods || []).length > 0 || !!cfg.checkoutNotice, tip: true, text: 'Customers are told how pickup or delivery works (a fulfillment option or checkout notice)', fix: 'settings' },
+  ];
+  const mailRow = h('li', { class: 'ready__row' }, h('span', { class: 'loader loader--sm', 'aria-hidden': 'true' }), h('span', {}, 'Checking the email connection…'));
+  const paint = (r) => {
+    const mark = r.ok ? '✓' : (r.tip ? 'i' : '!');
+    const node = h('li', { class: `ready__row ${r.ok ? 'is-ok' : (r.tip ? 'is-tip' : 'is-bad')}` }, h('span', { class: 'ready__mark', 'aria-hidden': 'true' }, mark), h('span', {}, r.text), r.ok ? null : h('button', { class: 'linkbtn', type: 'button', onclick: () => go(r.fix, false, false, true) }, r.tip ? 'Review' : 'Fix'));
+    return node;
+  };
+  callable('adminGetMailConfig', {}).then((c) => mailRow.replaceWith(paint({ ok: !!c.configured, text: c.configured ? 'Email is connected to Make' : 'Email is not connected: confirmations wait in a queue until it is', fix: 'settings' })))
+    .catch(() => mailRow.replaceWith(paint({ ok: false, tip: true, text: 'Could not check the email connection', fix: 'settings' })));
+  const needs = rows.filter((r) => !r.ok && !r.tip).length;
+  return h('section', { class: 'panel', 'aria-labelledby': 'ov-ready' }, h('h2', { id: 'ov-ready' }, needs ? 'Before the drop' : 'Drop checklist'),
+    h('ul', { class: 'ready' }, ...rows.map(paint), mailRow));
+}
+
 /** Open/closed as the admin dashboard shows it, worked out here from the schedules an admin can read (saves waiting on a server function). */
 function localStatus(rows) {
   const t = Date.now();
@@ -207,18 +250,21 @@ function localStatus(rows) {
 
 async function viewOverview(out) {
   const { db, fs } = F;
-  const [products, recent, scheds, all, failedSnap] = await Promise.all([
+  const [products, recent, scheds, all, failedSnap, settingsSnap] = await Promise.all([
     loadProducts(true),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(8))),
     fs.getDocs(fs.collection(db, 'storeSchedules')),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(1000))),
     fs.getDocs(fs.query(fs.collection(db, 'mail'), fs.where('status', '==', 'failed'), fs.limit(20))),
+    fs.getDoc(fs.doc(db, 'settings', 'public')).catch(() => null),
   ]);
 
   const status = localStatus(scheds.docs.map((d) => ({ active: d.data().active === true, opens: ms(d.data().opensAt), closes: ms(d.data().closesAt) })));
 
   // ---- numbers (every order that is not cancelled counts as a sale; "paid" is what you recorded by hand) ----
-  const orders = all.docs.map(snapOrder);
+  const everyOrder = all.docs.map(snapOrder);
+  const orders = everyOrder.filter((o) => !o.deleted);                  // orders in the Trash count for nothing
+  const inTrash = everyOrder.length - orders.length;
   const live = orders.filter((o) => o.status !== 'cancelled');
   const sum = (arr, f) => arr.reduce((n, x) => n + f(x), 0);
   const unitsOf = (o) => sum(o.items || [], (i) => i.quantity);
@@ -290,6 +336,7 @@ async function viewOverview(out) {
       card('Not paid yet', String(unpaidOrders.length), `${awaitingAction} not delivered yet`),
       card('Failed emails', String(failedMail), failedMail ? 'Open the order to retry' : 'None'),
     ),
+    readinessPanel(products, scheds, settingsSnap),
     section('ov-status', 'Orders by status', table(['Status', 'Orders', 'Paid', 'Not paid', 'Value'], byStatus, ['Total (not cancelled)', String(live.length), String(paidOrders.length), String(unpaidOrders.length), money(revenue)])),
     section('ov-pay', 'Payments received', h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Based on the Paid checkbox you set on each order.'),
       table(['Method', 'Orders', 'Amount'], byMethod, ['Total collected', String(paidOrders.length), money(collected)]),
@@ -299,15 +346,17 @@ async function viewOverview(out) {
       ? h('div', { class: 'bars' }, dayList.map(([k, d]) => h('div', { class: 'barrow' }, h('span', { class: 'barrow__l' }, k), h('span', { class: 'barrow__b' }, h('span', { style: `width:${Math.max(2, Math.round((d.orders / maxDay) * 100))}%` })), h('span', { class: 'barrow__v' }, `${d.orders} order${d.orders === 1 ? '' : 's'} · ${d.units} item${d.units === 1 ? '' : 's'}`))))
       : h('p', { class: 'empty' }, 'No orders yet.')),
     section('ov-inv', 'What to order', h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Totals across all orders that are not cancelled. Use this when the drop has closed and you place the supplier order.'),
+      want.length ? h('div', { class: 'row-actions', style: 'margin-bottom:.8rem' }, h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => downloadCsv(`what-to-order-${todayStamp()}.csv`, [['Product', 'Size', 'Color', 'Quantity'], ...want.map((a) => [a.name, a.size, a.color, a.qty]), ['', '', 'Total', units]]) }, 'Download as CSV')) : null,
       want.length ? table(['Product', 'Size', 'Color', 'Quantity'], want.map((a) => [a.name, a.size, a.color, String(a.qty)]), ['', '', 'Total', String(units)]) : h('p', { class: 'empty' }, 'No orders yet.'),
       all.size >= 1000 ? h('p', { class: 'fine' }, 'Showing the latest 1000 orders only.') : null),
-    section('ov-recent', 'Recent orders', ordersTable(recent.docs.map(snapOrder))),
+    section('ov-recent', 'Recent orders', ordersTable(recent.docs.map(snapOrder).filter((o) => !o.deleted))),
     section('ov-store', 'Store details', h('dl', { class: 'kv' },
       h('dt', {}, 'Customers'), h('dd', {}, `${customers} unique email${customers === 1 ? '' : 's'}`),
       h('dt', {}, 'Average order'), h('dd', {}, live.length ? money(Math.round(revenue / live.length)) : '-'),
       h('dt', {}, 'First order'), h('dd', {}, times.length ? fmtNY(Math.min(...times), { year: true }) : '-'),
       h('dt', {}, 'Latest order'), h('dd', {}, times.length ? fmtNY(Math.max(...times), { year: true }) : '-'),
-      h('dt', {}, 'Products'), h('dd', {}, `${products.filter((p) => p.active).length} active, ${products.filter((p) => !p.active).length} hidden`),
+      h('dt', {}, 'Products'), h('dd', {}, `${products.filter((p) => p.active && !p.archivedAt).length} active, ${products.filter((p) => !p.active && !p.archivedAt).length} hidden, ${products.filter((p) => p.archivedAt).length} archived`),
+      h('dt', {}, 'In the Trash'), h('dd', {}, `${inTrash} order${inTrash === 1 ? '' : 's'} (deleted for good after 30 days)`),
       h('dt', {}, 'Schedules'), h('dd', {}, `${scheds.size} configured`))),
   );
 }
@@ -315,7 +364,7 @@ async function viewOverview(out) {
 
 /* ============================== orders ============================== */
 
-const snapOrder = (d) => ({ id: d.id, ...d.data(), status: normStatus(d.data().status), createdAtMillis: ms(d.data().createdAt) });
+const snapOrder = (d) => ({ id: d.id, ...d.data(), status: normStatus(d.data().status), deleted: !!d.data().deletedMillis, createdAtMillis: ms(d.data().createdAt) });
 
 const payTag = (o) => (o.status === 'cancelled' ? h('span', { class: 'fine' }, 'n/a') : (o.paid === true ? tag('paid', `Paid${PAY_LABEL[o.paymentMethod] ? ` · ${PAY_LABEL[o.paymentMethod]}` : ''}`) : tag('unpaid', 'Not paid')));
 
@@ -331,27 +380,51 @@ function ordersTable(orders, onOpen) {
       h('td', {}, h('button', { class: 'linkbtn', type: 'button', onclick: (e) => { e.stopPropagation(); open(o); } }, 'Open', h('span', { class: 'sr-only' }, ` ${o.orderNumber}`))))))));
 }
 
+/** Every order that is not in the Trash, as a spreadsheet: for packing lists, delivery and your own records. */
+async function exportOrdersCsv() {
+  const { db, fs } = F;
+  const snap = await fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'asc'), fs.limit(5000)));
+  const orders = snap.docs.map(snapOrder).filter((o) => !o.deleted);
+  const rows = [['Order', 'Placed (ET)', 'Name', 'Email', 'Phone', 'Fulfillment', 'Items', 'Total (USD)', 'Status', 'Paid', 'Payment method']];
+  for (const o of orders) {
+    rows.push([o.orderNumber, fmtNY(o.createdAtMillis, { year: true }), o.customerName, o.customerEmail, o.customerPhone || '',
+      (o.fulfillmentMethod === 'arranged_separately' ? 'To be arranged' : o.fulfillmentMethod) + (o.fulfillmentDetails ? `: ${o.fulfillmentDetails}` : ''),
+      (o.items || []).map((i) => `${i.quantity} x ${i.productName} (${i.size} / ${i.color})`).join('; '),
+      dollars(o.subtotalCents), STATUS_LABEL[o.status] || o.status, o.paid === true ? 'Yes' : 'No', PAY_LABEL[o.paymentMethod] || '']);
+  }
+  downloadCsv(`orders-${todayStamp()}.csv`, rows);
+  toast(`Exported ${orders.length} order${orders.length === 1 ? '' : 's'}.`);
+}
+
 async function viewOrders(out) {
   const { db, fs } = F;
   const state = { status: '', pay: '', q: '', rows: [], last: null, done: false };
   const list = h('div', {});
   const more = h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => fetchPage(true) }, 'Load more');
   const statusSel = h('select', { id: 'o-status', onchange: () => { state.status = statusSel.value; reset(); } },
-    h('option', { value: '' }, 'All statuses'), ...Object.keys(STATUS_LABEL).map((s) => h('option', { value: s }, STATUS_LABEL[s])));
+    h('option', { value: '' }, 'All statuses'), ...Object.keys(STATUS_LABEL).map((s) => h('option', { value: s }, STATUS_LABEL[s])), h('option', { value: 'trash' }, 'Trash'));
   const paySel = h('select', { id: 'o-pay', onchange: () => { state.pay = paySel.value; draw(); } }, h('option', { value: '' }, 'Paid and not paid'), h('option', { value: 'paid' }, 'Paid only'), h('option', { value: 'unpaid' }, 'Not paid only'));
   const search = h('input', { type: 'text', id: 'o-q', placeholder: 'Order number, name or email', 'aria-describedby': 'o-help', oninput: () => { state.q = search.value.trim(); draw(); } });
   const find = h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => findExact().catch(fail) }, 'Find order number');
+  const exportBtn = h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: (e) => guarded(e.currentTarget, exportOrdersCsv) }, 'Export all as CSV');
 
   async function fetchPage(append) {
-    const cons = [];
-    if (state.status) cons.push(fs.where('status', '==', state.status));
-    cons.push(fs.orderBy('createdAt', 'desc'));
-    if (append && state.last) cons.push(fs.startAfter(state.last));
-    cons.push(fs.limit(25));
-    const snap = await fs.getDocs(fs.query(fs.collection(db, 'orders'), ...cons));
-    state.rows = append ? state.rows.concat(snap.docs.map(snapOrder)) : snap.docs.map(snapOrder);
+    const trash = state.status === 'trash';
+    let q;
+    if (trash) q = fs.query(fs.collection(db, 'orders'), fs.where('deletedMillis', '>', 0), fs.orderBy('deletedMillis', 'desc'), fs.limit(100));
+    else {
+      const cons = [];
+      if (state.status) cons.push(fs.where('status', '==', state.status));
+      cons.push(fs.orderBy('createdAt', 'desc'));
+      if (append && state.last) cons.push(fs.startAfter(state.last));
+      cons.push(fs.limit(25));
+      q = fs.query(fs.collection(db, 'orders'), ...cons);
+    }
+    const snap = await fs.getDocs(q);
+    const rows = snap.docs.map(snapOrder).filter((o) => (trash ? o.deleted : !o.deleted));   // trashed orders only show in the Trash view
+    state.rows = append && !trash ? state.rows.concat(rows) : rows;
     state.last = snap.docs[snap.docs.length - 1] || state.last;
-    state.done = snap.size < 25;
+    state.done = trash ? true : snap.size < 25;
     draw();
   }
   function reset() { state.rows = []; state.last = null; fetchPage(false).catch(fail); }
@@ -363,6 +436,7 @@ async function viewOrders(out) {
     if (q) rows = rows.filter((o) => [o.orderNumber, o.customerName, o.customerEmail, o.customerPhone].some((x) => String(x || '').toLowerCase().includes(q)));
     clear(list).append(ordersTable(rows, safeOpen));
     more.hidden = state.done;
+    if (state.status === 'trash') list.prepend(h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Orders in the Trash are left out of every total and are deleted for good 30 days after they were moved here. Open one to restore it or delete it now.'));
     if (!rows.length && (q || state.pay)) list.replaceChildren(h('p', { class: 'empty' }, 'No orders match these filters.'));
     if (q && !rows.length && !state.done) list.append(h('p', { class: 'fine' }, 'No match in the orders loaded so far. Load more, or use "Find order number" for an exact order number.'));
   }
@@ -375,7 +449,7 @@ async function viewOrders(out) {
   }
 
   clear(out).append(
-    h('div', { class: 'toolbar' }, h('div', { class: 'field' }, h('label', { for: 'o-status' }, 'Status'), statusSel), h('div', { class: 'field' }, h('label', { for: 'o-pay' }, 'Payment'), paySel), h('div', { class: 'field', style: 'flex:1 1 260px' }, h('label', { for: 'o-q' }, 'Search'), search), find),
+    h('div', { class: 'toolbar' }, h('div', { class: 'field' }, h('label', { for: 'o-status' }, 'Status'), statusSel), h('div', { class: 'field' }, h('label', { for: 'o-pay' }, 'Payment'), paySel), h('div', { class: 'field', style: 'flex:1 1 260px' }, h('label', { for: 'o-q' }, 'Search'), search), find, exportBtn),
     h('p', { class: 'fine', id: 'o-help', style: 'margin-bottom:1rem' }, 'Search filters the orders loaded below. Payment is never collected on the website: open an order and tick Paid once you receive cash, Venmo or Zelle.'),
     h('section', { class: 'panel' }, list, h('div', { style: 'margin-top:1rem' }, more)));
   await fetchPage(false);
@@ -387,7 +461,7 @@ async function viewOrders(out) {
 }
 
 function paymentBox(o) {
-  const locked = o.status === 'cancelled';
+  const locked = o.status === 'cancelled' || o.deleted === true;
   const cb = h('input', { type: 'checkbox', id: 'pay-paid', checked: o.paid === true, disabled: locked });
   const sel = h('select', { id: 'pay-method', disabled: locked }, h('option', { value: '' }, 'Choose method...'), ...Object.entries(PAY_LABEL).map(([v, l]) => h('option', { value: v, selected: o.paymentMethod === v }, l)));
   const save = h('button', { class: 'btn btn--primary btn--sm', type: 'button', disabled: locked }, 'Save payment');
@@ -401,7 +475,7 @@ function paymentBox(o) {
     h('div', { class: 'row-actions', style: 'align-items:center' },
       h('label', { for: 'pay-paid', style: 'display:inline-flex;gap:.5rem;align-items:center;min-height:44px' }, cb, 'Paid'),
       h('label', { for: 'pay-method', class: 'sr-only' }, 'Payment method'), sel, save),
-    h('p', { class: 'fine', style: 'margin-top:.5rem' }, locked ? 'This order is cancelled, so it cannot be marked paid.' : (o.paid === true && o.paidAtMillis ? `Marked paid ${fmtNY(o.paidAtMillis, { year: true })}. ` : '') + 'Money is never collected on the website: tick Paid after you receive it by cash, Venmo or Zelle.'));
+    h('p', { class: 'fine', style: 'margin-top:.5rem' }, locked ? (o.deleted ? 'This order is in the Trash. Restore it to change payment.' : 'This order is cancelled, so it cannot be marked paid.') : (o.paid === true && o.paidAtMillis ? `Marked paid ${fmtNY(o.paidAtMillis, { year: true })}. ` : '') + 'Money is never collected on the website: tick Paid after you receive it by cash, Venmo or Zelle.'));
 }
 
 let ordersDirty = false;     // set when an order changed, so the lists behind the dialog are refreshed when it closes
@@ -416,7 +490,7 @@ async function openOrder(o) {
   o = snapOrder(fresh);
   const mails = mailSnap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => (ms(a.createdAt) || 0) - (ms(b.createdAt) || 0));
   const actions = h('div', { class: 'row-actions' });
-  for (const next of STATUS_NEXT[o.status] || []) {
+  for (const next of (o.deleted ? [] : (STATUS_NEXT[o.status] || []))) {
     const btn = h('button', { class: next === 'cancelled' ? 'btn btn--ghost btn--sm' : 'btn btn--primary btn--sm', type: 'button' }, ACTION_LABEL[next]);
     btn.onclick = () => {
       const msg = next === 'cancelled' ? `Cancel ${o.orderNumber}? The customer is emailed. This cannot be undone.` : (next === 'ordered' ? `Move ${o.orderNumber} back to Ordered? The customer is not emailed.` : `Mark ${o.orderNumber} as delivered? The customer will be emailed.`);
@@ -427,12 +501,25 @@ async function openOrder(o) {
     };
     actions.append(btn);
   }
-  const del = h('button', { class: 'btn btn--ghost btn--sm', type: 'button' }, 'Delete order permanently');
-  del.onclick = () => {
-    const paidNote = o.paid === true ? `\n\nWARNING: this order is marked PAID (${PAY_LABEL[o.paymentMethod] || 'method not recorded'}).` : '';
-    if (!confirm(`Permanently delete ${o.orderNumber} (${o.customerName})? The order and its email records are erased and cannot be recovered. No email is sent to the customer.${paidNote}`)) return;
-    guarded(del, async () => { await callable('adminDeleteOrder', { orderId: o.id }); ordersDirty = true; toast(`${o.orderNumber} deleted`); ensureDialog('order-dlg').close(); });
+  const inTrash = o.deleted === true;
+  const trashBtn = h('button', { class: 'btn btn--ghost btn--sm', type: 'button', disabled: o.paid === true }, 'Move to Trash');
+  trashBtn.onclick = () => {
+    const msg = `Move ${o.orderNumber} (${o.customerName}) to the Trash?\n\n` +
+      (o.status === 'ordered' ? 'It has NOT been delivered, so this customer is still expecting it. They are not told it was removed (use "Cancel order" instead if they should be emailed).\n\n' : '') +
+      'It disappears from the lists, totals and What to order. You can restore it from Orders > Trash for 30 days; after that it is deleted for good.';
+    if (!confirm(msg)) return;
+    guarded(trashBtn, async () => { await callable('adminTrashOrder', { orderId: o.id }); ordersDirty = true; toast(`${o.orderNumber} moved to the Trash`); ensureDialog('order-dlg').close(); });
   };
+  const restoreBtn = h('button', { class: 'btn btn--primary btn--sm', type: 'button' }, 'Restore order');
+  restoreBtn.onclick = () => guarded(restoreBtn, async () => { await callable('adminRestoreOrder', { orderId: o.id }); ordersDirty = true; toast(`${o.orderNumber} restored`); await openOrder(o); });
+  const foreverBtn = h('button', { class: 'btn btn--ghost btn--sm', type: 'button' }, 'Delete forever');
+  foreverBtn.onclick = () => {
+    if (!confirm(`Delete ${o.orderNumber} (${o.customerName}) FOREVER? The order and its email records are erased and cannot be recovered. No email is sent to the customer.`)) return;
+    guarded(foreverBtn, async () => { await callable('adminDeleteOrder', { orderId: o.id }); ordersDirty = true; toast(`${o.orderNumber} deleted for good`); ensureDialog('order-dlg').close(); });
+  };
+  const deleteZone = inTrash
+    ? h('div', {}, h('div', { class: 'notice notice--warn' }, `This order is in the Trash${o.deletedMillis ? ` since ${fmtNY(o.deletedMillis, { year: true })}` : ''} and is deleted for good after 30 days. It is left out of all totals.`), h('div', { class: 'row-actions', style: 'margin-top:.8rem' }, restoreBtn, foreverBtn))
+    : h('div', {}, trashBtn, h('p', { class: 'fine', style: 'margin-top:.4rem' }, o.paid === true ? 'A paid order cannot be trashed. Refund the customer and set it to Not paid first.' : 'Moves this order to the Trash. You can restore it for 30 days.'));
   const dlg = ensureDialog('order-dlg');
   clear(dlg).append(
     h('div', { class: 'dlg-head' }, h('h2', { id: 'order-dlg-t' }, `Order ${o.orderNumber}`), h('button', { class: 'iconbtn', type: 'button', 'aria-label': 'Close order', onclick: () => dlg.close() }, icon.close())),
@@ -453,7 +540,7 @@ async function openOrder(o) {
       h('div', {}, h('h3', { style: 'font:600 .75rem/1 var(--body);letter-spacing:.15em;text-transform:uppercase;color:var(--faint);margin-bottom:.6rem' }, 'Emails'),
         mails.length ? h('ul', {}, mails.map((m) => h('li', { class: 'fine', style: 'display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;padding:.3rem 0' }, tag(m.status === 'sent' ? 'sent' : m.status === 'failed' ? 'failed' : 'pending', m.status === 'sent' ? 'sent to Make' : m.status), `${m.kind.replace(/_/g, ' ')} → ${m.to}`, m.attempts ? `(attempts: ${m.attempts})` : '', m.lastError && m.status !== 'sent' ? h('span', { class: 'alert' }, m.lastError) : null,
           m.status === 'failed' ? h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: (e) => guarded(e.currentTarget, async () => { await callable('adminResendMail', { mailId: m.id }); ordersDirty = true; toast('Email re-queued'); await openOrder(o); }) }, 'Retry') : null))) : h('p', { class: 'fine' }, 'No email records.')),
-      h('div', {}, del, h('p', { class: 'fine', style: 'margin-top:.4rem' }, 'Permanently removes this order and its email records. This cannot be undone.')),
+      deleteZone,
     ),
   );
   dlg.addEventListener('close', () => {
@@ -478,16 +565,57 @@ function ensureDialog(id) {
 
 /* ============================== products ============================== */
 
+/** "Delete" a product = archive it: gone from the shop at once, every order keeps its own copy of the details, and it can be restored. */
+async function archiveFlow(p, btn) {
+  return guarded(btn, async () => {
+    const imp = await callable('adminProductImpact', { id: p.id });
+    const lines = [`Delete "${p.name}"?`, ''];
+    lines.push(imp.orders
+      ? `${imp.orders} order${imp.orders === 1 ? ' includes' : 's include'} it (${imp.notDelivered} not delivered yet). ${imp.orders === 1 ? 'It keeps' : 'They keep'} every detail, still ${imp.orders === 1 ? 'counts' : 'count'} in your totals and in What to order, and ${imp.orders === 1 ? 'is' : 'are'} not changed.`
+      : 'No orders include this product.');
+    lines.push('', 'It leaves the shop right away; anyone with it in their cart is told it is no longer available.', 'It moves to "Archived products" on this page, where you can restore it (with its photos and sizes) or delete it forever.');
+    if (!confirm(lines.join('\n'))) return false;
+    await callable('adminArchiveProduct', { id: p.id });
+    toast(`"${p.name}" archived. You can restore it under Archived products.`);
+    go('products');
+    return true;
+  });
+}
+async function purgeFlow(p, btn) {
+  return guarded(btn, async () => {
+    const imp = await callable('adminProductImpact', { id: p.id });
+    const used = imp.orders + imp.trashed;
+    const msg = `Delete "${p.name}" FOREVER?\n\nThe product, its sizes/colors and its photos are erased for good and cannot be brought back.` +
+      (used ? `\n\n${used} order${used === 1 ? ' includes' : 's include'} it. ${used === 1 ? 'It keeps its' : 'They keep their'} own copy of the name, size, color and price, so ${used === 1 ? 'it is' : 'they are'} not affected.` : '');
+    if (!confirm(msg)) return false;
+    await callable('adminPurgeProduct', { id: p.id });
+    toast(`"${p.name}" deleted forever.`);
+    go('products');
+    return true;
+  });
+}
+
 async function viewProducts(out) {
-  const products = await loadProducts(true);
+  const all = await loadProducts(true);
+  const products = all.filter((p) => !p.archivedAt);
+  const archived = all.filter((p) => p.archivedAt);
   clear(out).append(
     h('div', { class: 'toolbar' }, h('button', { class: 'btn btn--primary btn--sm', type: 'button', onclick: () => editProduct(null) }, 'New product')),
     h('section', { class: 'panel' }, h('h2', {}, 'Products'),
       products.length ? h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Product', 'Price', 'Variants', 'Status', ''].map((x) => h('th', { scope: 'col' }, x)))),
-        h('tbody', {}, products.map((p) => {
-          return h('tr', { class: 'click', onclick: () => editProduct(p) }, h('td', {}, p.name, p.featured ? ' ★' : ''), h('td', {}, money(p.priceCents)), h('td', {}, String(p.variants.filter((v) => v.active).length)), h('td', {}, tag(p.active ? 'open' : 'inactive', p.active ? 'Active' : 'Inactive')),
-            h('td', {}, h('button', { class: 'linkbtn', type: 'button', onclick: (e) => { e.stopPropagation(); editProduct(p); } }, 'Edit', h('span', { class: 'sr-only' }, ` ${p.name}`))));
-        })))) : h('p', { class: 'empty' }, 'No products yet. Add your first product; nothing appears on the shop until it is active and the store is open.')));
+        h('tbody', {}, products.map((p) => h('tr', { class: 'click', onclick: () => editProduct(p) }, h('td', {}, p.name, p.featured ? ' ★' : ''), h('td', {}, money(p.priceCents)), h('td', {}, String(p.variants.filter((v) => v.active).length)), h('td', {}, tag(p.active ? 'open' : 'inactive', p.active ? 'Active' : 'Hidden')),
+          h('td', {}, h('div', { class: 'row-actions' },
+            h('button', { class: 'linkbtn', type: 'button', onclick: (e) => { e.stopPropagation(); editProduct(p); } }, 'Edit', h('span', { class: 'sr-only' }, ` ${p.name}`)),
+            h('button', { class: 'linkbtn', type: 'button', onclick: (e) => { e.stopPropagation(); archiveFlow(p, e.currentTarget); } }, 'Delete', h('span', { class: 'sr-only' }, ` ${p.name}`)))))))))
+        : h('p', { class: 'empty' }, 'No products yet. Add your first product; nothing appears on the shop until it is active and the store is open.')),
+    archived.length ? h('details', { class: 'panel archived' }, h('summary', {}, `Archived products (${archived.length})`),
+      h('p', { class: 'fine', style: 'margin:.6rem 0 1rem' }, 'Deleted products wait here. Restore one to use it again (it comes back hidden), or delete it forever. Orders already placed are never affected.'),
+      h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, ['Product', 'Price', 'Archived', ''].map((x) => h('th', { scope: 'col' }, x)))),
+        h('tbody', {}, archived.map((p) => h('tr', {}, h('td', {}, p.name), h('td', {}, money(p.priceCents)), h('td', {}, p.archivedAt ? fmtNY(ms(p.archivedAt), { year: true }) : ''),
+          h('td', {}, h('div', { class: 'row-actions' },
+            h('button', { class: 'linkbtn', type: 'button', onclick: (e) => guarded(e.currentTarget, async () => { await callable('adminRestoreProduct', { id: p.id }); toast(`"${p.name}" restored as hidden. Open it and switch on Active to show it in the shop.`); go('products'); }) }, 'Restore', h('span', { class: 'sr-only' }, ` ${p.name}`)),
+            h('button', { class: 'linkbtn', type: 'button', onclick: (e) => purgeFlow(p, e.currentTarget) }, 'Delete forever', h('span', { class: 'sr-only' }, ` ${p.name}`))))))))))
+      : null);
 }
 
 function resizeImage(file, max = 1600, quality = 0.86) {
@@ -623,7 +751,8 @@ function editProduct(existing) {
           drawVariants();
         } }, 'Generate sizes × colors')),
       h('p', { class: 'fine' }, 'Removing a row retires that size/color (past orders keep their details). There are no stock counts: every drop is a pre-order and you order exactly what was requested.'),
-      h('div', { class: 'row-actions', style: 'margin-top:1.4rem' }, save, h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => dlg.close() }, 'Cancel')),
+      h('div', { class: 'row-actions', style: 'margin-top:1.4rem' }, save, h('button', { class: 'btn btn--ghost', type: 'button', onclick: () => dlg.close() }, 'Cancel'),
+        existing && !existing.archivedAt ? h('button', { class: 'btn btn--ghost', type: 'button', style: 'margin-left:auto', onclick: async (e) => { if (await archiveFlow(existing, e.currentTarget)) dlg.close(); } }, 'Delete product') : null),
     ));
   drawImages(); drawVariants();
   dlg.showModal();

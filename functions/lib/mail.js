@@ -104,7 +104,7 @@ async function claim(db, id, now = Date.now()) {
     const snap = await tx.get(ref);
     if (!snap.exists) return null;
     const m = snap.data();
-    if (m.status === 'sent' || m.status === 'failed') return null;
+    if (m.status === 'sent' || m.status === 'failed' || m.status === 'skipped') return null;
     if (m.status === 'sending' && m.leaseUntilMillis > now) return null;
     if (m.nextAttemptAtMillis > now) return null;
     tx.update(ref, { status: 'sending', leaseUntilMillis: now + LEASE_MS, attempts: (m.attempts || 0) + 1, updatedAt: new Date(now) });

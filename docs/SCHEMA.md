@@ -12,6 +12,8 @@ rules allow (see `firestore.rules`). Field names marked **(private)** are never 
 | `images` | `[{url, path, alt}]` | first image is the main one; `path` is `products/{productId}/{file}` in Storage |
 | `active` | bool | only active products are public |
 | `featured` | bool | listed first |
+| `variants` | `[{id,size,color,sku}]` | copy of the active sizes/colors so the shop needs one read |
+| `archivedAt`, `archivedBy` | timestamp / uid \| null | set by "Delete product" (archive); an archived product is inactive and hidden, and can be restored |
 | `createdAt`, `updatedAt`, `updatedBy` | timestamp / uid | |
 
 ## `products/{productId}/variants/{variantId}`  (public read when variant **and** product are active)
@@ -97,3 +99,16 @@ TTL policies on `expireAt` for `rateLimits` and `idempotency` are declared in `f
 
 ## Indexes (`firestore.indexes.json`)
 `products(active, createdAt desc)`, `orders(status, createdAt desc)`, `mail(status, createdAt desc)`.
+
+## Deleting things safely
+
+Orders keep an **immutable snapshot** of every product detail (name, size, color, SKU, unit price), so removing a product can never damage an order.
+
+**Orders: Trash, then gone.** `adminTrashOrder` sets `deletedMillis` (the order is left out of lists, totals, What to order and exports; emails not yet sent are marked `skipped`).
+A **paid** order cannot be trashed (refund and set it to Not paid first). A trashed order cannot be edited. `adminRestoreOrder` clears the flag.
+`adminDeleteOrder` ("Delete forever") works only on trashed orders and also removes the order's `mail` and `idempotency` records.
+The nightly `purgeTrash` function erases orders that have been in the Trash for 30 days.
+
+**Products: Archive, then delete forever.** "Delete product" archives it (`archivedAt`, inactive, hidden, restorable with its photos and sizes).
+`adminPurgeProduct` works only on archived products and removes the product, its `variants` and its photos. `adminProductImpact` reports how many orders contain a product (shown before either action).
+Saving an archived product as active brings it back from the archive. Photos taken off a product are deleted from Storage.

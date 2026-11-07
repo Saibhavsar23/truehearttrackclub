@@ -2,6 +2,7 @@
 const { initializeApp } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
 const { getFirestore } = require('firebase-admin/firestore');
+const { getStorage } = require('firebase-admin/storage');
 const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const { onDocumentCreated } = require('firebase-functions/v2/firestore');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
@@ -20,6 +21,18 @@ const db = getFirestore();
 const ADMIN_EMAIL = defineString('ADMIN_EMAIL', { default: 'truehearttrackclub@gmail.com' });
 const SITE_URL = defineString('SITE_URL', { default: '' });
 const ENFORCE_APP_CHECK = defineBoolean('ENFORCE_APP_CHECK', { default: false });
+
+/** Deletes files from the default Storage bucket. Best effort: a failure is logged and never blocks the admin's action. */
+const storageHelper = {
+  async deleteFiles(paths) {
+    for (const p of paths) {
+      try { await getStorage().bucket().file(p).delete({ ignoreNotFound: true }); } catch (e) { logger.warn('could not delete ' + p + ': ' + (e && e.message)); }
+    }
+  },
+  async deletePrefix(prefix) {
+    try { await getStorage().bucket().deleteFiles({ prefix }); } catch (e) { logger.warn('could not delete files under ' + prefix + ': ' + (e && e.message)); }
+  },
+};
 
 const REGION = 'us-east1';
 const base = { region: REGION, maxInstances: 10 };
@@ -75,7 +88,13 @@ exports.submitOrder = onCall({ ...base, minInstances: 1 }, wrap(async (request) 
 
 // ------------------------------------ admin ------------------------------------
 
-exports.adminSaveProduct = onCall(base, wrap(async (request) => svc.adminSaveProduct(db, await requireAdmin(request), request.data)));
+exports.adminSaveProduct = onCall(base, wrap(async (request) => svc.adminSaveProduct(db, await requireAdmin(request), request.data, storageHelper)));
+exports.adminProductImpact = onCall(base, wrap(async (request) => { await requireAdmin(request); return svc.productImpact(db, request.data && request.data.id); }));
+exports.adminArchiveProduct = onCall(base, wrap(async (request) => svc.adminArchiveProduct(db, await requireAdmin(request), request.data && request.data.id)));
+exports.adminRestoreProduct = onCall(base, wrap(async (request) => svc.adminRestoreProduct(db, await requireAdmin(request), request.data && request.data.id)));
+exports.adminPurgeProduct = onCall(base, wrap(async (request) => { await requireAdmin(request); return svc.adminPurgeProduct(db, request.data && request.data.id, storageHelper); }));
+exports.adminTrashOrder = onCall(base, wrap(async (request) => svc.adminTrashOrder(db, await requireAdmin(request), request.data && request.data.orderId)));
+exports.adminRestoreOrder = onCall(base, wrap(async (request) => { await requireAdmin(request); return svc.adminRestoreOrder(db, request.data && request.data.orderId); }));
 exports.adminSaveSchedule = onCall(base, wrap(async (request) => svc.adminSaveSchedule(db, await requireAdmin(request), request.data)));
 exports.adminDeleteSchedule = onCall(base, wrap(async (request) => svc.adminDeleteSchedule(db, await requireAdmin(request), request.data && request.data.id)));
 exports.adminSaveSettings = onCall(base, wrap(async (request) => svc.adminSaveSettings(db, await requireAdmin(request), request.data)));
@@ -133,6 +152,12 @@ async function send(job) {
 /** Deliver immediately when an order (or status update) queues a job. Retries are handled by the sweeper below. */
 exports.deliverMail = onDocumentCreated({ ...base, document: 'mail/{id}' }, async (event) => {
   await M.processMail(db, event.params.id, send, { logger });
+});
+
+/** Every night: orders that have sat in the Trash for 30 days are erased for good. */
+exports.purgeTrash = onSchedule({ ...base, schedule: 'every day 04:00', timeZone: 'America/New_York' }, async () => {
+  const r = await svc.purgeTrash(db);
+  if (r.purged) logger.info(`purged ${r.purged} order(s) from the Trash`);
 });
 
 /** Every 5 minutes: retry jobs that failed (with backoff) or whose worker died mid-send (expired lease). */
