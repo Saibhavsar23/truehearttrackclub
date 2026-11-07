@@ -94,3 +94,6 @@ table.t td .linkbtn{ min-height:auto; }
 .ready__row .linkbtn{ margin-left:auto; }
 /* ---- archived products ---- */
 .archived summary{ cursor:pointer; min-height:44px; display:flex; align-items:center; font:400 1.3rem/1 var(--display); letter-spacing:.05em; text-transform:uppercase; }
+
+/* four summary cards fit on one row */
+.cards{ grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); }

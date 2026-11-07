@@ -99,7 +99,7 @@ function renderDenied() {
 
 /* ============================== shell ============================== */
 
-const TABS = [['overview', 'Overview'], ['orders', 'Orders'], ['products', 'Products'], ['schedules', 'Schedules'], ['settings', 'Settings']];
+const TABS = [['overview', 'Overview'], ['orders', 'Orders'], ['products', 'Products'], ['schedules', 'Schedules'], ['reports', 'Reports'], ['settings', 'Settings']];
 let panel;
 
 function renderShell() {
@@ -147,7 +147,7 @@ function accountMenu() {
 }
 
 /* ---- tab navigation: the last finished screen of each tab is shown instantly while a fresh copy loads, and the other tabs are loaded in the background ---- */
-const VIEWS = { overview: viewOverview, orders: viewOrders, products: viewProducts, schedules: viewSchedules, settings: viewSettings };
+const VIEWS = { overview: viewOverview, orders: viewOrders, products: viewProducts, schedules: viewSchedules, reports: viewReports, settings: viewSettings };
 const tabCache = {};      // tab id -> { node }
 const gens = {};          // tab id -> counter, so only the newest load of a tab is kept
 let navSeq = 0;
@@ -179,7 +179,7 @@ function go(id, focus, initial, useCache = false) {
   const mine = ++navSeq;
   $$tabs().forEach((b) => { const on = b.id === `tab-${id}`; b.setAttribute('aria-selected', String(on)); b.tabIndex = on ? 0 : -1; if (on && focus) b.focus(); });
   const cached = useCache ? tabCache[id] : null;
-  if (!useCache) delete tabCache[id];
+  if (!useCache) { delete tabCache[id]; statsPromise = null; }          // after a change, numbers are worked out afresh
   showPanel(cached ? cached.node : h('div', {}, loaderBlock()));
   if (cached && id === 'settings') return;                  // a form: leave exactly what is on screen
   build(id).then(({ box, g }) => {
@@ -212,33 +212,6 @@ async function loadProducts(force) {
 
 /* ============================== overview ============================== */
 
-/** "Is the next drop ready?" Green ticks, and a Fix button for anything that is not. */
-function readinessPanel(products, scheds, settingsSnap) {
-  const t0 = Date.now();
-  const act = products.filter((p) => p.active && !p.archivedAt);
-  const sch = scheds.docs.map((d) => ({ active: d.data().active === true, opens: ms(d.data().opensAt), closes: ms(d.data().closesAt) })).filter((s) => s.active);
-  const open = sch.some((s) => s.opens <= t0 && t0 < s.closes);
-  const upcoming = sch.some((s) => s.opens > t0);
-  const cfg = settingsSnap && settingsSnap.exists() ? settingsSnap.data() : {};
-  const rows = [
-    { ok: act.length > 0 && act.every((p) => p.variants.length > 0), text: act.length ? 'Every active product has sizes and colors' : 'There are no active products yet', fix: 'products' },
-    { ok: act.length > 0 && act.every((p) => (p.images || []).length > 0), text: 'Every active product has a photo', fix: 'products' },
-    { ok: open || upcoming, text: open ? 'The shop is open right now' : (upcoming ? 'A drop is scheduled' : 'No open or upcoming drop is scheduled'), fix: 'schedules' },
-    { ok: (cfg.fulfillmentMethods || []).length > 0 || !!cfg.checkoutNotice, tip: true, text: 'Customers are told how pickup or delivery works (a fulfillment option or checkout notice)', fix: 'settings' },
-  ];
-  const mailRow = h('li', { class: 'ready__row' }, h('span', { class: 'loader loader--sm', 'aria-hidden': 'true' }), h('span', {}, 'Checking the email connection…'));
-  const paint = (r) => {
-    const mark = r.ok ? '✓' : (r.tip ? 'i' : '!');
-    const node = h('li', { class: `ready__row ${r.ok ? 'is-ok' : (r.tip ? 'is-tip' : 'is-bad')}` }, h('span', { class: 'ready__mark', 'aria-hidden': 'true' }, mark), h('span', {}, r.text), r.ok ? null : h('button', { class: 'linkbtn', type: 'button', onclick: () => go(r.fix, false, false, true) }, r.tip ? 'Review' : 'Fix'));
-    return node;
-  };
-  callable('adminGetMailConfig', {}).then((c) => mailRow.replaceWith(paint({ ok: !!c.configured, text: c.configured ? 'Email is connected to Make' : 'Email is not connected: confirmations wait in a queue until it is', fix: 'settings' })))
-    .catch(() => mailRow.replaceWith(paint({ ok: false, tip: true, text: 'Could not check the email connection', fix: 'settings' })));
-  const needs = rows.filter((r) => !r.ok && !r.tip).length;
-  return h('section', { class: 'panel', 'aria-labelledby': 'ov-ready' }, h('h2', { id: 'ov-ready' }, needs ? 'Before the drop' : 'Drop checklist'),
-    h('ul', { class: 'ready' }, ...rows.map(paint), mailRow));
-}
-
 /** Open/closed as the admin dashboard shows it, worked out here from the schedules an admin can read (saves waiting on a server function). */
 function localStatus(rows) {
   const t = Date.now();
@@ -248,40 +221,73 @@ function localStatus(rows) {
   return { open: !!cur, closesAtMillis: cur ? cur.closes : null, nextOpensAtMillis: cur ? null : (nxt ? nxt.opens : null), serverNowMillis: t };
 }
 
-async function viewOverview(out) {
+/** Everything the Overview and Reports tabs show, worked out once from the latest 1000 orders (orders in the Trash count for nothing). */
+let statsPromise = null; let statsAt = 0;
+function getStats() {
+  if (statsPromise && Date.now() - statsAt < 3000) return statsPromise;      // Overview and Reports opening together share one load
+  statsAt = Date.now();
+  statsPromise = computeStats().catch((e) => { statsPromise = null; throw e; });
+  return statsPromise;
+}
+async function computeStats() {
   const { db, fs } = F;
-  const [products, recent, scheds, all, failedSnap, settingsSnap] = await Promise.all([
+  const [products, scheds, all, failedSnap] = await Promise.all([
     loadProducts(true),
-    fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(8))),
     fs.getDocs(fs.collection(db, 'storeSchedules')),
     fs.getDocs(fs.query(fs.collection(db, 'orders'), fs.orderBy('createdAt', 'desc'), fs.limit(1000))),
     fs.getDocs(fs.query(fs.collection(db, 'mail'), fs.where('status', '==', 'failed'), fs.limit(20))),
-    fs.getDoc(fs.doc(db, 'settings', 'public')).catch(() => null),
   ]);
-
   const status = localStatus(scheds.docs.map((d) => ({ active: d.data().active === true, opens: ms(d.data().opensAt), closes: ms(d.data().closesAt) })));
-
-  // ---- numbers (every order that is not cancelled counts as a sale; "paid" is what you recorded by hand) ----
   const everyOrder = all.docs.map(snapOrder);
-  const orders = everyOrder.filter((o) => !o.deleted);                  // orders in the Trash count for nothing
-  const inTrash = everyOrder.length - orders.length;
-  const live = orders.filter((o) => o.status !== 'cancelled');
+  const orders = everyOrder.filter((o) => !o.deleted);
+  const live = orders.filter((o) => o.status !== 'cancelled');                // every order that is not cancelled counts as a sale
   const sum = (arr, f) => arr.reduce((n, x) => n + f(x), 0);
   const unitsOf = (o) => sum(o.items || [], (i) => i.quantity);
-  const units = sum(live, unitsOf);
-  const revenue = sum(live, (o) => o.subtotalCents);
-  const paidOrders = live.filter((o) => o.paid === true);
-  const unpaidOrders = live.filter((o) => o.paid !== true);
-  const collected = sum(paidOrders, (o) => o.subtotalCents);
-  const awaitingAction = live.filter((o) => o.status === 'ordered').length;
-  const failedMail = failedSnap.size;
-  const customers = new Set(live.map((o) => String(o.customerEmail || '').toLowerCase())).size;
-  const times = live.map((o) => o.createdAtMillis).filter(Boolean);
-  const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '0%');
+  const paidOrders = live.filter((o) => o.paid === true);                     // "paid" is what you recorded by hand
+  return {
+    products, scheds, status, orders, live, sum, unitsOf, paidOrders,
+    inTrash: everyOrder.length - orders.length,
+    capped: all.size >= 1000,
+    recent: orders.slice(0, 6),
+    unpaidOrders: live.filter((o) => o.paid !== true),
+    units: sum(live, unitsOf),
+    revenue: sum(live, (o) => o.subtotalCents),
+    collected: sum(paidOrders, (o) => o.subtotalCents),
+    notDelivered: live.filter((o) => o.status === 'ordered').length,
+    failedMail: failedSnap.size,
+  };
+}
 
-  const byStatus = Object.keys(STATUS_LABEL).map((s) => {
-    const list = orders.filter((o) => o.status === s);
-    return [tag(s, STATUS_LABEL[s]), String(list.length), s === 'cancelled' ? '-' : String(list.filter((o) => o.paid === true).length), s === 'cancelled' ? '-' : String(list.filter((o) => o.paid !== true).length), money(sum(list, (o) => o.subtotalCents))];
+const overviewCard = (title, big, sub) => h('div', { class: 'card2' }, h('h3', {}, title), h('p', { class: 'big' }, big), h('p', { class: 'fine', style: 'margin-top:.5rem' }, sub));
+const dataTable = (heads, rows, foot) => h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, heads.map((x) => h('th', { scope: 'col' }, x)))),
+  h('tbody', {}, rows.map((r) => h('tr', {}, r.map((c) => h('td', {}, c)))), foot ? h('tr', {}, foot.map((c) => h('td', { style: 'font-weight:700' }, c))) : null)));
+const panelSection = (id, title, ...kids) => h('section', { class: 'panel', 'aria-labelledby': id }, h('h2', { id }, title), ...kids);
+
+/** The short version: is the shop open, how are orders and money doing, and what came in last. Everything else lives in Reports. */
+async function viewOverview(out) {
+  const st = await getStats();
+  const next = st.status.nextOpensAtMillis;
+  const pct = st.live.length ? Math.round((st.paidOrders.length / st.live.length) * 100) : 0;
+  clear(out).append(
+    st.failedMail ? h('div', { class: 'notice notice--error', role: 'alert', style: 'margin-bottom:1rem' }, h('strong', {}, `${st.failedMail} email${st.failedMail === 1 ? '' : 's'} could not be sent.`), ' Open the order (Orders tab) and press Retry on the email.') : '',
+    h('div', { class: 'cards' },
+      overviewCard('Store status', st.status.open ? 'Open' : 'Closed', st.status.open ? `Closes ${fmtNY(st.status.closesAtMillis)}` : (next ? `Opens ${fmtNY(next, { year: true })}` : 'No upcoming schedule')),
+      overviewCard('Orders', String(st.live.length), st.live.length ? `${st.notDelivered} not delivered yet · ${st.units} items` : 'No orders yet'),
+      overviewCard('Order value', money(st.revenue), `${money(st.collected)} paid · ${money(st.revenue - st.collected)} to collect`),
+      overviewCard('Paid', `${st.paidOrders.length} / ${st.live.length}`, `${pct}% of orders marked paid`),
+    ),
+    panelSection('ov-recent', 'Recent orders', ordersTable(st.recent),
+      h('div', { class: 'row-actions', style: 'margin-top:1rem' }, h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => go('orders', false, false, true) }, 'All orders'), h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => go('reports', false, false, true) }, 'Reports'))),
+  );
+}
+
+/** The detail: what to order, sales, payments, a daily chart and store facts. */
+async function viewReports(out) {
+  const st = await getStats();
+  const { live, orders, paidOrders, unpaidOrders, sum, unitsOf, units, revenue, collected } = st;
+  const byStatus = Object.keys(STATUS_LABEL).map((k) => {
+    const list = orders.filter((o) => o.status === k);
+    return [tag(k, STATUS_LABEL[k]), String(list.length), k === 'cancelled' ? '-' : String(list.filter((o) => o.paid === true).length), k === 'cancelled' ? '-' : String(list.filter((o) => o.paid !== true).length), money(sum(list, (o) => o.subtotalCents))];
   });
   const byMethod = Object.keys(PAY_LABEL).map((m) => {
     const list = paidOrders.filter((o) => o.paymentMethod === m);
@@ -320,47 +326,34 @@ async function viewOverview(out) {
   }
   const want = [...totals.values()].sort((a, b) => a.name.localeCompare(b.name) || a.size.localeCompare(b.size, undefined, { numeric: true }) || a.color.localeCompare(b.color));
 
-  const next = status.nextOpensAtMillis;
-  const card = (title, big, sub) => h('div', { class: 'card2' }, h('h3', {}, title), h('p', { class: 'big' }, big), h('p', { class: 'fine', style: 'margin-top:.5rem' }, sub));
-  const table = (heads, rows, foot) => h('div', { class: 'tablewrap' }, h('table', { class: 't' }, h('thead', {}, h('tr', {}, heads.map((x) => h('th', { scope: 'col' }, x)))),
-    h('tbody', {}, rows.map((r) => h('tr', {}, r.map((c) => h('td', {}, c)))), foot ? h('tr', {}, foot.map((c) => h('td', { style: 'font-weight:700' }, c))) : null)));
-  const section = (id, title, ...kids) => h('section', { class: 'panel', 'aria-labelledby': id }, h('h2', { id }, title), ...kids);
+  const customers = new Set(live.map((o) => String(o.customerEmail || '').toLowerCase())).size;
+  const times = live.map((o) => o.createdAtMillis).filter(Boolean);
+  const products = st.products;
 
   clear(out).append(
-    h('div', { class: 'cards' },
-      card('Store status', status.open ? 'Open' : 'Closed', status.open ? `Closes ${fmtNY(status.closesAtMillis)}` : (next ? `Opens ${fmtNY(next, { year: true })}` : 'No upcoming schedule')),
-      card('Orders', String(live.length), `${orders.length - live.length} cancelled`),
-      card('Items sold', String(units), live.length ? `${(units / live.length).toFixed(1)} per order on average` : 'No orders yet'),
-      card('Order value', money(revenue), `${money(collected)} paid · ${money(revenue - collected)} still to collect`),
-      card('Paid', `${paidOrders.length} / ${live.length}`, `${pct(paidOrders.length, live.length)} of orders marked paid`),
-      card('Not paid yet', String(unpaidOrders.length), `${awaitingAction} not delivered yet`),
-      card('Failed emails', String(failedMail), failedMail ? 'Open the order to retry' : 'None'),
-    ),
-    readinessPanel(products, scheds, settingsSnap),
-    section('ov-status', 'Orders by status', table(['Status', 'Orders', 'Paid', 'Not paid', 'Value'], byStatus, ['Total (not cancelled)', String(live.length), String(paidOrders.length), String(unpaidOrders.length), money(revenue)])),
-    section('ov-pay', 'Payments received', h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Based on the Paid checkbox you set on each order.'),
-      table(['Method', 'Orders', 'Amount'], byMethod, ['Total collected', String(paidOrders.length), money(collected)]),
+    panelSection('rp-inv', 'What to order',
+      h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Totals across all orders that are not cancelled. Use this when the drop has closed and you place the supplier order.'),
+      want.length ? h('div', { class: 'row-actions', style: 'margin-bottom:.8rem' }, h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => downloadCsv(`what-to-order-${todayStamp()}.csv`, [['Product', 'Size', 'Color', 'Quantity'], ...want.map((a) => [a.name, a.size, a.color, a.qty]), ['', '', 'Total', units]]) }, 'Download as CSV')) : null,
+      want.length ? dataTable(['Product', 'Size', 'Color', 'Quantity'], want.map((a) => [a.name, a.size, a.color, String(a.qty)]), ['', '', 'Total', String(units)]) : h('p', { class: 'empty' }, 'No orders yet.'),
+      st.capped ? h('p', { class: 'fine' }, 'Showing the latest 1000 orders only.') : null),
+    panelSection('rp-prod', 'Sales by product', byProduct.length ? dataTable(['Product', 'Units', 'Orders', 'Order value', 'Paid'], byProduct.map((p) => [p.name, String(p.units), String(p.orders), money(p.revenue), money(p.paidRevenue)])) : h('p', { class: 'empty' }, 'No orders yet.')),
+    panelSection('rp-status', 'Orders by status', dataTable(['Status', 'Orders', 'Paid', 'Not paid', 'Value'], byStatus, ['Total (not cancelled)', String(live.length), String(paidOrders.length), String(unpaidOrders.length), money(revenue)])),
+    panelSection('rp-pay', 'Payments received', h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Based on the Paid checkbox you set on each order.'),
+      dataTable(['Method', 'Orders', 'Amount'], byMethod, ['Total collected', String(paidOrders.length), money(collected)]),
       h('p', { class: 'fine', style: 'margin-top:.6rem' }, `Still to collect: ${money(revenue - collected)} across ${unpaidOrders.length} order${unpaidOrders.length === 1 ? '' : 's'}.`)),
-    section('ov-prod', 'Sales by product', byProduct.length ? table(['Product', 'Units', 'Orders', 'Order value', 'Paid'], byProduct.map((p) => [p.name, String(p.units), String(p.orders), money(p.revenue), money(p.paidRevenue)])) : h('p', { class: 'empty' }, 'No orders yet.')),
-    section('ov-days', 'Orders per day (New York time)', dayList.length
+    panelSection('rp-days', 'Orders per day (New York time)', dayList.length
       ? h('div', { class: 'bars' }, dayList.map(([k, d]) => h('div', { class: 'barrow' }, h('span', { class: 'barrow__l' }, k), h('span', { class: 'barrow__b' }, h('span', { style: `width:${Math.max(2, Math.round((d.orders / maxDay) * 100))}%` })), h('span', { class: 'barrow__v' }, `${d.orders} order${d.orders === 1 ? '' : 's'} · ${d.units} item${d.units === 1 ? '' : 's'}`))))
       : h('p', { class: 'empty' }, 'No orders yet.')),
-    section('ov-inv', 'What to order', h('p', { class: 'fine', style: 'margin-bottom:.8rem' }, 'Totals across all orders that are not cancelled. Use this when the drop has closed and you place the supplier order.'),
-      want.length ? h('div', { class: 'row-actions', style: 'margin-bottom:.8rem' }, h('button', { class: 'btn btn--ghost btn--sm', type: 'button', onclick: () => downloadCsv(`what-to-order-${todayStamp()}.csv`, [['Product', 'Size', 'Color', 'Quantity'], ...want.map((a) => [a.name, a.size, a.color, a.qty]), ['', '', 'Total', units]]) }, 'Download as CSV')) : null,
-      want.length ? table(['Product', 'Size', 'Color', 'Quantity'], want.map((a) => [a.name, a.size, a.color, String(a.qty)]), ['', '', 'Total', String(units)]) : h('p', { class: 'empty' }, 'No orders yet.'),
-      all.size >= 1000 ? h('p', { class: 'fine' }, 'Showing the latest 1000 orders only.') : null),
-    section('ov-recent', 'Recent orders', ordersTable(recent.docs.map(snapOrder).filter((o) => !o.deleted))),
-    section('ov-store', 'Store details', h('dl', { class: 'kv' },
+    panelSection('rp-store', 'Store details', h('dl', { class: 'kv' },
       h('dt', {}, 'Customers'), h('dd', {}, `${customers} unique email${customers === 1 ? '' : 's'}`),
       h('dt', {}, 'Average order'), h('dd', {}, live.length ? money(Math.round(revenue / live.length)) : '-'),
       h('dt', {}, 'First order'), h('dd', {}, times.length ? fmtNY(Math.min(...times), { year: true }) : '-'),
       h('dt', {}, 'Latest order'), h('dd', {}, times.length ? fmtNY(Math.max(...times), { year: true }) : '-'),
       h('dt', {}, 'Products'), h('dd', {}, `${products.filter((p) => p.active && !p.archivedAt).length} active, ${products.filter((p) => !p.active && !p.archivedAt).length} hidden, ${products.filter((p) => p.archivedAt).length} archived`),
-      h('dt', {}, 'In the Trash'), h('dd', {}, `${inTrash} order${inTrash === 1 ? '' : 's'} (deleted for good after 30 days)`),
-      h('dt', {}, 'Schedules'), h('dd', {}, `${scheds.size} configured`))),
+      h('dt', {}, 'In the Trash'), h('dd', {}, `${st.inTrash} order${st.inTrash === 1 ? '' : 's'} (deleted for good after 30 days)`),
+      h('dt', {}, 'Schedules'), h('dd', {}, `${st.scheds.size} configured`))),
   );
 }
-
 
 /* ============================== orders ============================== */
 
@@ -545,7 +538,7 @@ async function openOrder(o) {
   );
   dlg.addEventListener('close', () => {
     history.replaceState(null, '', location.pathname);
-    if (ordersDirty) { ordersDirty = false; if (tab === 'orders' || tab === 'overview') go(tab); }
+    if (ordersDirty) { ordersDirty = false; for (const k of ['overview', 'reports']) delete tabCache[k]; statsPromise = null; if (tab === 'orders' || tab === 'overview' || tab === 'reports') go(tab); }
   }, { once: true });
   if (!dlg.open) dlg.showModal();
 }
